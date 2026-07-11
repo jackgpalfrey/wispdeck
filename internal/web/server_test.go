@@ -142,6 +142,28 @@ func TestLoginRequiresOriginAndSetsHardenedCookie(t *testing.T) {
 	}
 }
 
+func TestLoginAcceptsBrowserControlledSameOriginFallback(t *testing.T) {
+	server := newTestServer(t, false)
+	values := url.Values{"username": {"alice"}, "password": {"correct horse battery staple"}}
+
+	r := request(http.MethodPost, "http://admin.example.test/login", values)
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, r)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("same-origin fetch status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	r = request(http.MethodPost, "http://admin.example.test/login", values)
+	r.Header.Set("Sec-Fetch-Site", "cross-site")
+	r.Header.Set("Origin", "http://admin.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cross-site fetch status = %d", w.Code)
+	}
+}
+
 func TestInvalidLoginsUseSameResponse(t *testing.T) {
 	server := newTestServer(t, false)
 	login := func(username, password string) *httptest.ResponseRecorder {

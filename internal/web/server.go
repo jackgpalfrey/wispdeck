@@ -150,7 +150,7 @@ func (s *Server) securityBoundary(next http.Handler) http.Handler {
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		if !s.config.Development {
@@ -626,11 +626,19 @@ func (s *Server) opaqueCookie(r *http.Request, name string) (string, bool) {
 }
 
 func (s *Server) validBrowserOrigin(r *http.Request) bool {
-	if strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site") {
+	fetchSite := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")))
+	if fetchSite == "cross-site" {
 		return false
 	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
+		// Some browsers omit Origin on same-origin HTML form submissions. The
+		// Sec-Fetch-Site header is browser-controlled and cannot be supplied by
+		// cross-origin JavaScript, so it is a safe fallback when no URL-bearing
+		// header is available.
+		if r.Referer() == "" {
+			return fetchSite == "same-origin"
+		}
 		referer, err := url.Parse(r.Referer())
 		if err != nil || referer.Scheme == "" || referer.Host == "" {
 			return false
