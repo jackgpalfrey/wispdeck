@@ -39,10 +39,24 @@ func run(args []string, stdin io.Reader, stdout io.Writer, logger *slog.Logger) 
 	case "serve":
 		return serve(args[1:], logger)
 	case "admin":
-		if len(args) < 2 || args[1] != "create" {
+		if len(args) < 2 {
 			return usageError()
 		}
-		return createAdmin(args[2:], stdin, stdout)
+		switch args[1] {
+		case "create":
+			return createAdmin(args[2:], stdin, stdout)
+		case "reset-mfa":
+			return resetMFA(args[2:], stdout)
+		case "reset-password":
+			return resetPassword(args[2:], stdin, stdout)
+		default:
+			return usageError()
+		}
+	case "auth-key":
+		if len(args) < 2 || args[1] != "generate" {
+			return usageError()
+		}
+		return generateAuthKey(args[2:], stdout)
 	case "help", "-h", "--help":
 		_, _ = fmt.Fprint(stdout, usage)
 		return nil
@@ -54,6 +68,9 @@ func run(args []string, stdin io.Reader, stdout io.Writer, logger *slog.Logger) 
 const usage = `Usage:
   wispdeck serve --admin-origin https://admin.example.com [options]
   wispdeck admin create --username USER [options]
+  wispdeck admin reset-mfa --username USER --yes [options]
+  wispdeck admin reset-password --username USER --yes [options]
+  wispdeck auth-key generate [options]
 
 Run "wispdeck <command> -h" for command-specific options.
 `
@@ -63,9 +80,13 @@ func usageError() error { return errors.New(strings.TrimSpace(usage)) }
 func serve(args []string, logger *slog.Logger) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	database := flags.String("database", "data/wispdeck.db", "control database path")
+	authKey := flags.String("auth-key", "data/auth.key", "installation authentication key path")
 	listen := flags.String("listen", "127.0.0.1:8080", "HTTP listen address")
 	adminOrigin := flags.String("admin-origin", "", "public admin origin (required)")
 	development := flags.Bool("development", false, "allow HTTP and insecure cookies for local development")
+	offlinePasswordCheck := flags.Bool("offline-password-check", false, "use only the built-in password blocklist")
+	var trustedProxies stringListFlag
+	flags.Var(&trustedProxies, "trusted-proxy", "trusted reverse-proxy CIDR (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -85,15 +106,33 @@ func serve(args []string, logger *slog.Logger) error {
 		return err
 	}
 	defer databaseStore.Close()
-	authService, err := auth.NewService(databaseStore)
+	keyMaterial, err := auth.LoadInstallationKey(*authKey)
 	if err != nil {
 		return err
 	}
+	passwordManager, err := auth.NewPasswordManager(keyMaterial)
+	if err != nil {
+		return err
+	}
+	authService, err := auth.NewService(databaseStore, passwordManager)
+	if err != nil {
+		return err
+	}
+	passkeyService, err := auth.NewPasskeyService(databaseStore, authService, keyMaterial, origin)
+	if err != nil {
+		return err
+	}
+	passwordChecker := auth.PasswordChecker(auth.NewStaticPasswordChecker())
+	if !*offlinePasswordCheck {
+		passwordChecker = auth.NewCombinedPasswordChecker(passwordChecker, auth.NewPwnedPasswordChecker(nil))
+	}
 	webServer, err := web.New(web.Config{
-		AdminOrigin: origin,
-		Development: *development,
-		Logger:      logger,
-	}, authService)
+		AdminOrigin:       origin,
+		Development:       *development,
+		Logger:            logger,
+		PasswordChecker:   passwordChecker,
+		TrustedProxyCIDRs: trustedProxies,
+	}, authService, passkeyService)
 	if err != nil {
 		return err
 	}
@@ -124,6 +163,15 @@ func serve(args []string, logger *slog.Logger) error {
 	return nil
 }
 
+type stringListFlag []string
+
+func (values *stringListFlag) String() string { return strings.Join(*values, ",") }
+
+func (values *stringListFlag) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
+
 func loopbackAddress(address string) bool {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -139,8 +187,10 @@ func loopbackAddress(address string) bool {
 func createAdmin(args []string, stdin io.Reader, stdout io.Writer) error {
 	flags := flag.NewFlagSet("admin create", flag.ContinueOnError)
 	database := flags.String("database", "data/wispdeck.db", "control database path")
+	authKey := flags.String("auth-key", "data/auth.key", "installation authentication key path")
 	usernameFlag := flags.String("username", "", "administrator username")
 	passwordStdin := flags.Bool("password-stdin", false, "read password and confirmation as two lines from standard input")
+	skipCompromisedCheck := flags.Bool("skip-compromised-password-check", false, "use only the built-in offline password blocklist")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -158,7 +208,24 @@ func createAdmin(args []string, stdin io.Reader, stdout io.Writer) error {
 	if password != confirmation {
 		return errors.New("passwords do not match")
 	}
-	passwordHash, err := auth.HashPassword(password)
+	checker := auth.PasswordChecker(auth.NewStaticPasswordChecker())
+	if !*skipCompromisedCheck {
+		checker = auth.NewCombinedPasswordChecker(checker, auth.NewPwnedPasswordChecker(nil))
+	}
+	if err := checker.Check(context.Background(), password, auth.PasswordContext{
+		Username: username, Service: "wispdeck",
+	}); err != nil {
+		return err
+	}
+	keyMaterial, err := auth.LoadInstallationKey(*authKey)
+	if err != nil {
+		return err
+	}
+	passwordManager, err := auth.NewPasswordManager(keyMaterial)
+	if err != nil {
+		return err
+	}
+	passwordHash, err := passwordManager.Hash(password)
 	if err != nil {
 		return err
 	}
@@ -172,6 +239,122 @@ func createAdmin(args []string, stdin io.Reader, stdout io.Writer) error {
 		return err
 	}
 	_, err = fmt.Fprintf(stdout, "Created administrator %q.\n", username)
+	return err
+}
+
+func generateAuthKey(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("auth-key generate", flag.ContinueOnError)
+	path := flags.String("path", "data/auth.key", "installation authentication key path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("auth-key generate does not accept positional arguments")
+	}
+	if err := auth.GenerateInstallationKey(*path); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(stdout, "Created authentication key %q. Back it up securely.\n", *path)
+	return err
+}
+
+func resetMFA(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("admin reset-mfa", flag.ContinueOnError)
+	database := flags.String("database", "data/wispdeck.db", "control database path")
+	usernameFlag := flags.String("username", "", "administrator username")
+	confirmed := flags.Bool("yes", false, "confirm destructive local recovery")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || !*confirmed {
+		return errors.New("reset-mfa requires --username and --yes")
+	}
+	username := auth.NormalizeUsername(*usernameFlag)
+	ctx := context.Background()
+	databaseStore, err := store.OpenSQLite(ctx, *database)
+	if err != nil {
+		return err
+	}
+	defer databaseStore.Close()
+	user, err := databaseStore.UserByUsername(ctx, username)
+	if err != nil {
+		return err
+	}
+	if err := databaseStore.ResetUserMFA(ctx, user.ID); err != nil {
+		return err
+	}
+	if err := databaseStore.RecordAuthEvent(ctx, auth.AuthEvent{
+		OccurredAt: time.Now().UTC(), Kind: "local_mfa_reset", Username: user.Username, UserID: user.ID,
+	}); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "Reset MFA for %q and revoked every session.\n", username)
+	return err
+}
+
+func resetPassword(args []string, stdin io.Reader, stdout io.Writer) error {
+	flags := flag.NewFlagSet("admin reset-password", flag.ContinueOnError)
+	database := flags.String("database", "data/wispdeck.db", "control database path")
+	authKey := flags.String("auth-key", "data/auth.key", "installation authentication key path")
+	usernameFlag := flags.String("username", "", "administrator username")
+	passwordStdin := flags.Bool("password-stdin", false, "read password and confirmation as two lines from standard input")
+	skipCompromisedCheck := flags.Bool("skip-compromised-password-check", false, "use only the built-in offline password blocklist")
+	confirmed := flags.Bool("yes", false, "confirm destructive local recovery")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || !*confirmed {
+		return errors.New("reset-password requires --username and --yes")
+	}
+	username := auth.NormalizeUsername(*usernameFlag)
+	if err := auth.ValidateUsername(username); err != nil {
+		return err
+	}
+	password, confirmation, err := readPasswords(stdin, stdout, *passwordStdin)
+	if err != nil {
+		return err
+	}
+	if password != confirmation {
+		return errors.New("passwords do not match")
+	}
+	checker := auth.PasswordChecker(auth.NewStaticPasswordChecker())
+	if !*skipCompromisedCheck {
+		checker = auth.NewCombinedPasswordChecker(checker, auth.NewPwnedPasswordChecker(nil))
+	}
+	if err := checker.Check(context.Background(), password, auth.PasswordContext{Username: username, Service: "wispdeck"}); err != nil {
+		return err
+	}
+	keyMaterial, err := auth.LoadInstallationKey(*authKey)
+	if err != nil {
+		return err
+	}
+	passwordManager, err := auth.NewPasswordManager(keyMaterial)
+	if err != nil {
+		return err
+	}
+	hash, err := passwordManager.Hash(password)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	databaseStore, err := store.OpenSQLite(ctx, *database)
+	if err != nil {
+		return err
+	}
+	defer databaseStore.Close()
+	user, err := databaseStore.UserByUsername(ctx, username)
+	if err != nil {
+		return err
+	}
+	if err := databaseStore.ResetUserAuthentication(ctx, user.ID, hash, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := databaseStore.RecordAuthEvent(ctx, auth.AuthEvent{
+		OccurredAt: time.Now().UTC(), Kind: "local_password_reset", Username: user.Username, UserID: user.ID,
+	}); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stdout, "Reset password and MFA for %q; every session was revoked.\n", username)
 	return err
 }
 

@@ -1,0 +1,28 @@
+{{define "passkey_login.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Verify passkey — Wispdeck</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+  <script src="/assets/webauthn.js" defer></script>
+</head>
+<body>
+  <main class="panel">
+    <h1>Verify your passkey</h1>
+    <p class="subtle">Your password was accepted. Complete sign-in with a passkey.</p>
+    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+    <p id="passkey-status" class="error hidden" role="alert"></p>
+    <button type="button" data-passkey-login>Use passkey</button>
+    <details>
+      <summary>Use a recovery code</summary>
+      <form action="/login/recovery" method="post">
+        <label for="recovery-code">Recovery code</label>
+        <input id="recovery-code" name="recovery_code" autocomplete="one-time-code" required>
+        <button type="submit" class="secondary">Recover account</button>
+      </form>
+    </details>
+  </main>
+</body>
+</html>{{end}}
+

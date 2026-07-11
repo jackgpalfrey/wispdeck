@@ -3,10 +3,11 @@
 Wispdeck is a self-hosted home for links and lightweight websites that wake on
 demand.
 
-The project is at the beginning of its implementation. The first implemented
-slice is the administrative authentication boundary. See
-[`docs/security-model.md`](docs/security-model.md) for the assumptions that
-shape it.
+The project is at the beginning of its implementation. Its first implemented
+slice is the production administrative authentication boundary. See
+[`docs/security-model.md`](docs/security-model.md) and
+[`docs/authentication.md`](docs/authentication.md) for the contracts that shape
+it.
 
 ## Development
 
@@ -18,21 +19,43 @@ go test ./...
 go vet ./...
 ```
 
-Create the first local administrator without putting a password in shell
-history:
+Generate the installation authentication key before creating the first local
+administrator. Neither operation puts a secret in shell history:
 
 ```sh
 go build -o wispdeck ./cmd/wispdeck
+./wispdeck auth-key generate
 ./wispdeck admin create --username admin
 ```
+
+Back up both `data/auth.key` and `data/wispdeck.db`. The database alone cannot
+decrypt passkeys or verify recovery codes and peppered password hashes. New
+passwords are screened against a built-in blocklist and the padded Have I Been
+Pwned range API. `--skip-compromised-password-check` is an explicit offline
+override for local CLI operations.
 
 For a production deployment, terminate TLS at a reverse proxy that preserves
 the original `Host` header, then provide the exact public admin origin:
 
 ```sh
-./wispdeck serve --admin-origin https://admin.example.com
+./wispdeck serve \
+  --admin-origin https://admin.example.com \
+  --trusted-proxy 127.0.0.1/32
 ```
 
-The admin origin must not serve hosted user content. `--development` permits
-HTTP and insecurely transported cookies for local testing and must never be
-enabled on a public listener.
+Only configure a trusted proxy range that is under your control; forwarding
+headers from every other peer are ignored. The proxy must preserve the original
+`Host` header. The admin origin must never serve hosted user content.
+
+`--development` permits HTTP and insecurely transported cookies for local
+testing, forces a loopback listener, and must not be used as a production
+configuration. `--offline-password-check` disables the online breached-password
+check for password changes and is likewise an explicit availability/security
+tradeoff.
+
+Local recovery deliberately revokes remote authentication state:
+
+```sh
+./wispdeck admin reset-mfa --username admin --yes
+./wispdeck admin reset-password --username admin --yes
+```

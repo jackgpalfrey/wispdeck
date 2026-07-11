@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
@@ -29,19 +29,107 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if version > schemaVersion {
 		return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
 	}
-	if version == 0 {
-		if err := migrationOne(ctx, tx); err != nil {
-			return err
+	for version < schemaVersion {
+		switch version + 1 {
+		case 1:
+			if err := migrationOne(ctx, tx); err != nil {
+				return err
+			}
+		case 2:
+			if err := migrationTwo(ctx, tx); err != nil {
+				return err
+			}
 		}
+		version++
 		if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
 			return fmt.Errorf("clear schema version: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version (version) VALUES (?)`, schemaVersion); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version (version) VALUES (?)`, version); err != nil {
 			return fmt.Errorf("write schema version: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrationTwo(ctx context.Context, tx *sql.Tx) error {
+	// Password-only sessions from schema v1 must not survive the transition to
+	// explicit authentication assurance levels.
+	const schema = `
+		DELETE FROM sessions;
+		ALTER TABLE sessions ADD COLUMN assurance TEXT NOT NULL DEFAULT 'mfa'
+			CHECK(assurance IN ('bootstrap', 'mfa', 'recovery'));
+		ALTER TABLE sessions ADD COLUMN authenticated_at INTEGER NOT NULL DEFAULT 0;
+		ALTER TABLE sessions ADD COLUMN client_ip TEXT NOT NULL DEFAULT '';
+		ALTER TABLE sessions ADD COLUMN user_agent TEXT NOT NULL DEFAULT '';
+
+		DROP INDEX auth_events_occurred_at;
+		ALTER TABLE auth_events RENAME TO auth_events_v1;
+		CREATE TABLE auth_events (
+			id INTEGER PRIMARY KEY,
+			occurred_at INTEGER NOT NULL,
+			kind TEXT NOT NULL CHECK(length(kind) BETWEEN 1 AND 64),
+			username TEXT,
+			user_id TEXT,
+			client_ip TEXT,
+			details TEXT NOT NULL DEFAULT ''
+		) STRICT;
+		INSERT INTO auth_events (id, occurred_at, kind, username, user_id, client_ip)
+			SELECT id, occurred_at, kind, username, user_id, client_ip FROM auth_events_v1;
+		DROP TABLE auth_events_v1;
+		CREATE INDEX auth_events_occurred_at ON auth_events(occurred_at);
+		CREATE INDEX auth_events_user_id ON auth_events(user_id, occurred_at);
+
+		CREATE TABLE webauthn_credentials (
+			credential_id BLOB NOT NULL,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			rp_id TEXT NOT NULL,
+			name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),
+			encrypted_record BLOB NOT NULL,
+			created_at INTEGER NOT NULL,
+			last_used_at INTEGER,
+			PRIMARY KEY (rp_id, credential_id),
+			UNIQUE (user_id, rp_id, name)
+		) STRICT;
+		CREATE INDEX webauthn_credentials_user ON webauthn_credentials(user_id, rp_id);
+
+		CREATE TABLE login_transactions (
+			token_hash BLOB PRIMARY KEY CHECK(length(token_hash) = 32),
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			client_ip TEXT NOT NULL,
+			user_agent TEXT NOT NULL,
+			CHECK(created_at < expires_at)
+		) STRICT;
+		CREATE INDEX login_transactions_expires ON login_transactions(expires_at);
+
+		CREATE TABLE auth_ceremonies (
+			token_hash BLOB PRIMARY KEY CHECK(length(token_hash) = 32),
+			binding_hash BLOB NOT NULL CHECK(length(binding_hash) = 32),
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL CHECK(kind IN ('passkey_login', 'passkey_register')),
+			encrypted_data BLOB NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			CHECK(created_at < expires_at)
+		) STRICT;
+		CREATE INDEX auth_ceremonies_binding ON auth_ceremonies(binding_hash, kind);
+		CREATE INDEX auth_ceremonies_expires ON auth_ceremonies(expires_at);
+
+		CREATE TABLE recovery_codes (
+			code_digest BLOB PRIMARY KEY CHECK(length(code_digest) = 32),
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			batch_id TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			used_at INTEGER
+		) STRICT;
+		CREATE INDEX recovery_codes_user ON recovery_codes(user_id, used_at);
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 2: %w", err)
 	}
 	return nil
 }

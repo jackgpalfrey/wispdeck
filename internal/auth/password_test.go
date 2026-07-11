@@ -68,6 +68,23 @@ func TestPasswordPolicyCountsUnicodeCodePoints(t *testing.T) {
 	}
 }
 
+func TestPasswordHashNormalizesUnicodeNFC(t *testing.T) {
+	useFastPasswordParams(t)
+	composed := "caf\u00e9-caf\u00e9-caf\u00e9-caf\u00e9"
+	decomposed := "cafe\u0301-cafe\u0301-cafe\u0301-cafe\u0301"
+	hash, err := HashPassword(composed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched, err := VerifyPassword(decomposed, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matched {
+		t.Fatal("canonically equivalent password did not match")
+	}
+}
+
 func TestVerifyRejectsUnsafeHashParameters(t *testing.T) {
 	tests := []string{
 		"not-a-hash",

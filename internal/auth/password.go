@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -50,6 +51,7 @@ func ValidatePassword(password string) error {
 	if !utf8.ValidString(password) {
 		return errors.New("password must be valid UTF-8")
 	}
+	password = normalizePassword(password)
 	if len(password) > maxPasswordBytes {
 		return ErrPasswordTooLong
 	}
@@ -68,6 +70,7 @@ func HashPassword(password string) (string, error) {
 	if err := ValidatePassword(password); err != nil {
 		return "", err
 	}
+	password = normalizePassword(password)
 	p := defaultPasswordParams
 	salt := make([]byte, p.SaltLength)
 	if _, err := rand.Read(salt); err != nil {
@@ -84,11 +87,16 @@ func VerifyPassword(password, encoded string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	password = normalizePassword(password)
 	if len(password) > maxPasswordBytes {
 		return false, nil
 	}
-	actual := argon2.IDKey([]byte(password), salt, p.Iterations, p.Memory, p.Parallelism, uint32(len(expected)))
+	actual := argon2.IDKey([]byte(password), salt, p.Iterations, p.Memory, p.Parallelism, p.KeyLength)
 	return subtle.ConstantTimeCompare(actual, expected) == 1, nil
+}
+
+func normalizePassword(password string) string {
+	return norm.NFC.String(password)
 }
 
 // PasswordHashNeedsUpgrade reports whether encoded uses different resource
@@ -147,7 +155,9 @@ func decodeHash(encoded string) (PasswordParams, []byte, []byte, error) {
 	if err != nil || len(key) < 32 || len(key) > 64 {
 		return PasswordParams{}, nil, nil, ErrInvalidHash
 	}
+	// #nosec G115 -- the decoded lengths are constrained to 16-64 and 32-64 bytes above.
 	p.SaltLength = uint32(len(salt))
+	// #nosec G115 -- the decoded lengths are constrained to 16-64 and 32-64 bytes above.
 	p.KeyLength = uint32(len(key))
 	return p, salt, key, nil
 }

@@ -99,6 +99,20 @@ func (s *SQLite) UserByUsername(ctx context.Context, username string) (auth.User
 	return user, nil
 }
 
+func (s *SQLite) UserByID(ctx context.Context, userID string) (auth.User, error) {
+	var user auth.User
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, username, password_hash FROM users WHERE id = ?`, userID,
+	).Scan(&user.ID, &user.Username, &user.PasswordHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return auth.User{}, auth.ErrUserNotFound
+	}
+	if err != nil {
+		return auth.User{}, fmt.Errorf("query user by ID: %w", err)
+	}
+	return user, nil
+}
+
 func (s *SQLite) UpdatePasswordHash(ctx context.Context, userID, passwordHash string, now time.Time) error {
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, unix(now), userID,
@@ -109,12 +123,47 @@ func (s *SQLite) UpdatePasswordHash(ctx context.Context, userID, passwordHash st
 	return requireOneRow(result, "user")
 }
 
+func (s *SQLite) ChangePasswordAndRevoke(ctx context.Context, userID, passwordHash string, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin password change: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, unix(now), userID,
+	)
+	if err != nil {
+		return fmt.Errorf("update changed password: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return errors.New("password-change user not found")
+	}
+	for _, statement := range []string{
+		`DELETE FROM auth_ceremonies WHERE user_id = ?`,
+		`DELETE FROM login_transactions WHERE user_id = ?`,
+		`DELETE FROM sessions WHERE user_id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement, userID); err != nil {
+			return fmt.Errorf("revoke authentication state after password change: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit password change: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLite) CreateSession(ctx context.Context, session auth.SessionRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO sessions (token_hash, user_id, csrf_token, created_at, last_seen, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		INSERT INTO sessions (
+			token_hash, user_id, csrf_token, created_at, last_seen, expires_at,
+			assurance, authenticated_at, client_ip, user_agent
+		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.TokenHash[:], session.UserID, session.CSRFToken,
 		unix(session.CreatedAt), unix(session.LastSeen), unix(session.ExpiresAt),
+		session.Assurance, unix(session.AuthenticatedAt), session.ClientIP, session.UserAgent,
 	)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
@@ -125,15 +174,17 @@ func (s *SQLite) CreateSession(ctx context.Context, session auth.SessionRecord) 
 func (s *SQLite) SessionByTokenHash(ctx context.Context, digest [32]byte) (auth.Session, error) {
 	var session auth.Session
 	var tokenHash []byte
-	var createdAt, lastSeen, expiresAt int64
+	var createdAt, authenticatedAt, lastSeen, expiresAt int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT s.token_hash, s.csrf_token, s.created_at, s.last_seen, s.expires_at,
+		SELECT s.token_hash, s.csrf_token, s.assurance, s.created_at, s.authenticated_at,
+		       s.last_seen, s.expires_at, s.client_ip, s.user_agent,
 		       u.id, u.username
 		FROM sessions AS s
 		JOIN users AS u ON u.id = s.user_id
 		WHERE s.token_hash = ?`, digest[:],
 	).Scan(
-		&tokenHash, &session.CSRFToken, &createdAt, &lastSeen, &expiresAt,
+		&tokenHash, &session.CSRFToken, &session.Assurance, &createdAt, &authenticatedAt,
+		&lastSeen, &expiresAt, &session.ClientIP, &session.UserAgent,
 		&session.User.ID, &session.User.Username,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -147,6 +198,7 @@ func (s *SQLite) SessionByTokenHash(ctx context.Context, digest [32]byte) (auth.
 	}
 	copy(session.TokenHash[:], tokenHash)
 	session.CreatedAt = time.Unix(createdAt, 0).UTC()
+	session.AuthenticatedAt = time.Unix(authenticatedAt, 0).UTC()
 	session.LastSeen = time.Unix(lastSeen, 0).UTC()
 	session.ExpiresAt = time.Unix(expiresAt, 0).UTC()
 	return session, nil
@@ -170,14 +222,40 @@ func (s *SQLite) DeleteSession(ctx context.Context, digest [32]byte) error {
 
 func (s *SQLite) RecordAuthEvent(ctx context.Context, event auth.AuthEvent) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO auth_events (occurred_at, kind, username, user_id, client_ip)
-		VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))`,
-		unix(event.OccurredAt), event.Kind, event.Username, event.UserID, event.ClientIP,
+		INSERT INTO auth_events (occurred_at, kind, username, user_id, client_ip, details)
+		VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?)`,
+		unix(event.OccurredAt), event.Kind, event.Username, event.UserID, event.ClientIP, event.Details,
 	)
 	if err != nil {
 		return fmt.Errorf("insert auth event: %w", err)
 	}
 	return nil
+}
+
+func (s *SQLite) AuthEventsByUser(ctx context.Context, userID string, limit int) ([]auth.AuthEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT occurred_at, kind, COALESCE(username, ''), COALESCE(user_id, ''),
+		       COALESCE(client_ip, ''), details
+		FROM auth_events WHERE user_id = ?
+		ORDER BY occurred_at DESC, id DESC LIMIT ?`, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query authentication events: %w", err)
+	}
+	defer rows.Close()
+	var events []auth.AuthEvent
+	for rows.Next() {
+		var event auth.AuthEvent
+		var occurredAt int64
+		if err := rows.Scan(&occurredAt, &event.Kind, &event.Username, &event.UserID, &event.ClientIP, &event.Details); err != nil {
+			return nil, fmt.Errorf("scan authentication event: %w", err)
+		}
+		event.OccurredAt = time.Unix(occurredAt, 0).UTC()
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate authentication events: %w", err)
+	}
+	return events, nil
 }
 
 func requireOneRow(result sql.Result, kind string) error {

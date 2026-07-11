@@ -7,18 +7,39 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wispdeck/wispdeck/internal/auth"
 )
 
 func TestCreateAdminFromExplicitStdin(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data", "wispdeck.db")
-	input := strings.NewReader("correct horse battery staple\ncorrect horse battery staple\n")
+	keyPath := filepath.Join(t.TempDir(), "secrets", "auth.key")
+	if err := auth.GenerateInstallationKey(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	input := strings.NewReader("saffron-planetary-cello-woodland\nsaffron-planetary-cello-woodland\n")
 	var output bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	err := run([]string{"admin", "create", "--database", path, "--username", "Alice", "--password-stdin"}, input, &output, logger)
+	err := run([]string{
+		"admin", "create", "--database", path, "--auth-key", keyPath, "--username", "Alice",
+		"--password-stdin", "--skip-compromised-password-check",
+	}, input, &output, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), `Created administrator "alice"`) {
+		t.Fatalf("output = %q", output.String())
+	}
+}
+
+func TestGenerateAuthKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets", "auth.key")
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := run([]string{"auth-key", "generate", "--path", path}, strings.NewReader(""), &output, logger); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Back it up securely") {
 		t.Fatalf("output = %q", output.String())
 	}
 }

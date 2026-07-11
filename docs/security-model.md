@@ -27,14 +27,17 @@ administrative control; roles require a separate authorization design.
   variables. Automation may provide them through standard input explicitly.
 - Passwords must contain 15 to 256 Unicode code points and may contain spaces.
   There are no composition or periodic-rotation rules.
-- Passwords are encoded with Argon2id using a unique random salt. Hash
-  parameters are stored with the hash so they can be upgraded after login.
+- Passwords are normalized to Unicode NFC, keyed with an installation pepper,
+  and encoded with Argon2id using a unique random salt. Hash parameters are
+  stored with the hash so they can be upgraded after login.
+- New passwords are checked against local contextual values and the padded HIBP
+  k-anonymity range API unless a local operator explicitly chooses offline mode.
 - Unknown users take the password-verification path using a dummy hash to
   reduce account-enumeration timing differences.
 
-Compromised-password blocklisting and phishing-resistant MFA are required
-before Wispdeck should claim a mature authentication system. They are explicit
-post-v1 work rather than implicit omissions.
+Password authentication is followed by mandatory, user-verifying WebAuthn once
+the first passkey has been enrolled. Password-only bootstrap and recovery
+sessions are capability-restricted and cannot administer Wispdeck.
 
 ## Sessions
 
@@ -45,22 +48,24 @@ post-v1 work rather than implicit omissions.
 - Sessions have a 30-minute idle timeout and a 12-hour absolute lifetime.
 - Logout deletes the server-side session before expiring the browser cookie.
 - Authenticated responses use `Cache-Control: no-store`.
+- Operators can inspect recent authentication events and revoke other sessions.
 
 ## Login abuse controls
 
 Login failures use one generic response. Attempts are limited independently by
 normalized username and client address using bounded, in-memory sliding
 windows. Wispdeck does not trust forwarding headers unless a future deployment
-configuration explicitly identifies a trusted proxy.
+configuration explicitly identifies a trusted proxy. Recovery attempts are
+separately limited and recovery codes contain 128 random bits.
 
 ## Out of scope for this slice
 
 - TLS termination and reverse-proxy configuration
 - Uploaded-site isolation and content security policy
 - Data API authorization
-- Password recovery and MFA
+- Email or support-mediated account recovery
 - Distributed rate limiting
-- Audit-log retention policy
+- Configurable audit-log retention policy
 
 These are not assumed safe by the authentication implementation and must be
 designed before their corresponding feature is exposed.

@@ -17,6 +17,10 @@ body {
   width: min(24rem, calc(100% - 3rem));
 }
 
+.panel.wide {
+  width: min(42rem, calc(100% - 3rem));
+}
+
 form {
   display: grid;
   gap: 0.75rem;
@@ -48,6 +52,13 @@ button.secondary {
   border-color: GrayText;
 }
 
+button.danger {
+  width: auto;
+  border-color: #b71c1c;
+  background: transparent;
+  color: #b71c1c;
+}
+
 .subtle {
   color: GrayText;
 }
@@ -58,3 +69,34 @@ button.secondary {
   background: color-mix(in srgb, #c62828 12%, Canvas);
 }
 
+.notice {
+  padding: 0.75rem;
+  border-left: 0.25rem solid LinkText;
+  background: color-mix(in srgb, LinkText 10%, Canvas);
+}
+
+.hidden {
+  display: none;
+}
+
+details,
+section {
+  margin-top: 2rem;
+}
+
+.records {
+  padding: 0;
+  list-style: none;
+}
+
+.records li {
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid GrayText;
+}
+
+.codes {
+  columns: 2;
+  font-size: 0.9rem;
+}

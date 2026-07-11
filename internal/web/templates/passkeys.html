@@ -1,0 +1,96 @@
+{{define "passkeys.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Passkeys — Wispdeck</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+  <script src="/assets/webauthn.js" defer></script>
+</head>
+<body>
+  <main class="panel wide">
+    <h1>Passkeys</h1>
+    {{if eq .Assurance "bootstrap"}}
+      <p class="notice">Add your first passkey to finish securing this account. Other administration is unavailable until you do.</p>
+    {{else if eq .Assurance "recovery"}}
+      <p class="notice">You signed in with a recovery code. Add a replacement passkey before continuing.</p>
+    {{else}}
+      <p class="subtle">Passkeys provide the second factor for {{.Username}}.</p>
+    {{end}}
+
+    {{if .Passkeys}}
+    <ul class="records">
+      {{range .Passkeys}}
+      <li>
+        <strong>{{.Name}}</strong>
+        <span class="subtle">Added {{.CreatedAt.Format "2006-01-02 15:04 UTC"}}{{if .LastUsedAt}} · last used {{.LastUsedAt.Format "2006-01-02 15:04 UTC"}}{{end}}</span>
+        {{if eq $.Assurance "mfa"}}
+        <form action="/security/passkeys/delete" method="post">
+          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+          <input type="hidden" name="name" value="{{.Name}}">
+          <button type="submit" class="danger">Delete {{.Name}}</button>
+        </form>
+        {{end}}
+      </li>
+      {{end}}
+    </ul>
+    {{end}}
+
+    <section data-passkey-register data-csrf-token="{{.CSRFToken}}">
+      <h2>Add a passkey</h2>
+      <label for="passkey-name">Name</label>
+      <input id="passkey-name" name="name" maxlength="80" placeholder="Laptop, phone, security key" required>
+      <p id="passkey-status" class="error hidden" role="alert"></p>
+      <button type="button" data-register-button>Add passkey</button>
+    </section>
+
+    {{if eq .Assurance "mfa"}}
+    <section>
+      <h2>Recovery codes</h2>
+      <p class="subtle">Rotating codes immediately invalidates every previous unused code.</p>
+      <form action="/security/recovery-codes/rotate" method="post">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" class="secondary">Generate new recovery codes</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Sessions</h2>
+      <ul class="records">
+        {{range .Sessions}}
+        <li><strong>{{.Assurance}}</strong><span class="subtle">{{.ClientIP}} · {{.UserAgent}} · last active {{.LastSeen.Format "2006-01-02 15:04 UTC"}}</span></li>
+        {{end}}
+      </ul>
+      <form action="/security/sessions/revoke-others" method="post">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" class="secondary">Sign out other sessions</button>
+      </form>
+    </section>
+
+    <p><a href="/security/password">Change password</a></p>
+
+    <section>
+      <h2>Recent authentication activity</h2>
+      <ul class="records">
+        {{range .Events}}
+        <li><strong>{{.Kind}}</strong><span class="subtle">{{.OccurredAt.Format "2006-01-02 15:04 UTC"}} · {{.ClientIP}}{{if .Details}} · {{.Details}}{{end}}</span></li>
+        {{else}}<li class="subtle">No events recorded yet.</li>{{end}}
+      </ul>
+    </section>
+    {{end}}
+
+    <section id="recovery-codes" class="hidden" aria-live="polite">
+      <h2>Save these recovery codes</h2>
+      <p>Each code works once. Store them somewhere separate from this device; they will not be shown again.</p>
+      <ol id="recovery-code-list" class="codes"></ol>
+      <button type="button" class="secondary" data-copy-codes>Copy codes</button>
+    </section>
+
+    {{if eq .Assurance "mfa"}}<p><a href="/">Return to Wispdeck</a></p>{{end}}
+    <form action="/logout" method="post">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="secondary">Sign out</button>
+    </form>
+  </main>
+</body>
+</html>{{end}}

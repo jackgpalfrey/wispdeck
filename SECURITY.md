@@ -6,5 +6,6 @@ is published, report vulnerabilities privately to the operator of the affected
 installation.
 
 The project does not yet have a stable release. Security-sensitive design
-assumptions are recorded in [`docs/security-model.md`](docs/security-model.md).
-
+assumptions and factor lifecycle rules are recorded in
+[`docs/security-model.md`](docs/security-model.md) and
+[`docs/authentication.md`](docs/authentication.md).
