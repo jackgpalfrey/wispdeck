@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
@@ -39,6 +39,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err := migrationTwo(ctx, tx); err != nil {
 				return err
 			}
+		case 3:
+			if err := migrationThree(ctx, tx); err != nil {
+				return err
+			}
 		}
 		version++
 		if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
@@ -50,6 +54,33 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrationThree(ctx context.Context, tx *sql.Tx) error {
+	const schema = `
+		CREATE TABLE totp_credentials (
+			user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			encrypted_secret BLOB NOT NULL,
+			created_at INTEGER NOT NULL,
+			last_used_counter INTEGER CHECK(last_used_counter IS NULL OR last_used_counter >= 0)
+		) STRICT;
+
+		CREATE TABLE totp_enrollments (
+			token_hash BLOB PRIMARY KEY CHECK(length(token_hash) = 32),
+			binding_hash BLOB NOT NULL CHECK(length(binding_hash) = 32),
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			encrypted_secret BLOB NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			CHECK(created_at < expires_at)
+		) STRICT;
+		CREATE INDEX totp_enrollments_binding ON totp_enrollments(binding_hash);
+		CREATE INDEX totp_enrollments_expires ON totp_enrollments(expires_at);
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 3: %w", err)
 	}
 	return nil
 }

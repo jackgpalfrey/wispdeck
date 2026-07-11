@@ -15,7 +15,7 @@ var (
 	ErrLoginTransactionNotFound = errors.New("login transaction not found")
 	ErrPasskeyNameExists        = auth.ErrPasskeyNameExists
 	ErrRecoveryCodeInvalid      = errors.New("invalid or used recovery code")
-	ErrLastPasskey              = auth.ErrLastPasskey
+	ErrLastPasskey              = auth.ErrLastFactor
 )
 
 func (s *SQLite) PasskeysByUser(ctx context.Context, userID, rpID string) ([]auth.PasskeyRecord, error) {
@@ -171,7 +171,13 @@ func (s *SQLite) DeletePasskeyKeepingOne(ctx context.Context, userID, rpID, name
 	).Scan(&count); err != nil {
 		return fmt.Errorf("count passkeys before deletion: %w", err)
 	}
-	if count <= 1 {
+	var hasTOTP bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM totp_credentials WHERE user_id = ?)`, userID,
+	).Scan(&hasTOTP); err != nil {
+		return fmt.Errorf("check TOTP before passkey deletion: %w", err)
+	}
+	if count <= 1 && !hasTOTP {
 		return ErrLastPasskey
 	}
 	result, err := tx.ExecContext(ctx,
@@ -453,6 +459,8 @@ func (s *SQLite) ResetUserMFA(ctx context.Context, userID string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, statement := range []string{
+		`DELETE FROM totp_enrollments WHERE user_id = ?`,
+		`DELETE FROM totp_credentials WHERE user_id = ?`,
 		`DELETE FROM auth_ceremonies WHERE user_id = ?`,
 		`DELETE FROM login_transactions WHERE user_id = ?`,
 		`DELETE FROM recovery_codes WHERE user_id = ?`,
@@ -486,6 +494,8 @@ func (s *SQLite) ResetUserAuthentication(ctx context.Context, userID, passwordHa
 		return errors.New("local-reset user not found")
 	}
 	for _, statement := range []string{
+		`DELETE FROM totp_enrollments WHERE user_id = ?`,
+		`DELETE FROM totp_credentials WHERE user_id = ?`,
 		`DELETE FROM auth_ceremonies WHERE user_id = ?`,
 		`DELETE FROM login_transactions WHERE user_id = ?`,
 		`DELETE FROM recovery_codes WHERE user_id = ?`,

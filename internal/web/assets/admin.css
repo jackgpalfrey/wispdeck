@@ -100,3 +100,18 @@ section {
   columns: 2;
   font-size: 0.9rem;
 }
+
+.qr-code {
+  display: block;
+  max-width: 100%;
+  margin: 1.5rem auto;
+  image-rendering: pixelated;
+}
+
+.setup-secret {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: 0.75rem;
+  background: color-mix(in srgb, CanvasText 8%, Canvas);
+  user-select: all;
+}

@@ -13,8 +13,9 @@ User content is untrusted. It must never be served from the admin origin. The
 admin session cookie is host-only and is never scoped to a parent domain.
 Sibling subdomains are different origins but the same browser "site", so
 `SameSite` cookies alone are not an adequate CSRF defence. All unsafe admin
-requests require an exact `Origin` (or same-origin `Referer` fallback) and a
-session-bound CSRF token.
+requests require an exact `Origin`, same-origin `Referer`, or the
+browser-controlled `Sec-Fetch-Site: same-origin` fallback. Authenticated unsafe
+requests also require a session-bound CSRF token.
 
 The v1 server has local administrative users and no public registration, email
 recovery, API tokens, or delegated authorization. Every local user has full
@@ -35,9 +36,13 @@ administrative control; roles require a separate authorization design.
 - Unknown users take the password-verification path using a dummy hash to
   reduce account-enumeration timing differences.
 
-Password authentication is followed by mandatory, user-verifying WebAuthn once
-the first passkey has been enrolled. Password-only bootstrap and recovery
-sessions are capability-restricted and cannot administer Wispdeck.
+Password authentication is followed by a mandatory second factor once either a
+passkey or authenticator app has been enrolled. User-verifying WebAuthn is
+preferred because it is phishing resistant. RFC 6238 TOTP is available as a
+more broadly compatible alternative; its encrypted seed, single-use counters,
+clock window, and rate limits are defined in `authentication.md`. Password-only
+bootstrap and recovery sessions are capability-restricted and cannot administer
+Wispdeck.
 
 ## Sessions
 
@@ -54,9 +59,10 @@ sessions are capability-restricted and cannot administer Wispdeck.
 
 Login failures use one generic response. Attempts are limited independently by
 normalized username and client address using bounded, in-memory sliding
-windows. Wispdeck does not trust forwarding headers unless a future deployment
-configuration explicitly identifies a trusted proxy. Recovery attempts are
-separately limited and recovery codes contain 128 random bits.
+windows. Wispdeck does not trust forwarding headers unless deployment
+configuration explicitly identifies a trusted proxy. TOTP login, TOTP
+enrollment, and recovery attempts are separately limited; recovery codes
+contain 128 random bits.
 
 ## Out of scope for this slice
 

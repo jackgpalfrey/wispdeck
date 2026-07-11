@@ -109,7 +109,7 @@ func TestSQLiteRejectsNewerSchema(t *testing.T) {
 	}
 }
 
-func TestMigrationTwoInvalidatesPasswordOnlySessions(t *testing.T) {
+func TestMigrationsInvalidatePasswordOnlySessionsAndReachCurrentSchema(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "wispdeck.db")
 	db, err := sql.Open("sqlite", path)
@@ -157,6 +157,15 @@ func TestMigrationTwoInvalidatesPasswordOnlySessions(t *testing.T) {
 	}
 	if err := database.db.QueryRow(`SELECT count(*) FROM webauthn_credentials`).Scan(&count); err != nil {
 		t.Fatalf("schema v2 table missing: %v", err)
+	}
+	if err := database.db.QueryRow(`SELECT count(*) FROM totp_credentials`).Scan(&count); err != nil {
+		t.Fatalf("schema v3 table missing: %v", err)
+	}
+	if err := database.db.QueryRow(`SELECT version FROM schema_version`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", count, schemaVersion)
 	}
 }
 

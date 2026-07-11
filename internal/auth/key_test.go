@@ -47,6 +47,22 @@ func TestInstallationKeyFileAndCryptographicSeparation(t *testing.T) {
 	if _, err := key.DecryptCredential(ciphertext, "user-1", "admin.example.test"); err == nil {
 		t.Fatal("tampered credential decrypted")
 	}
+
+	totpSecret := bytes.Repeat([]byte{0x24}, 20)
+	totpCiphertext, err := key.EncryptTOTPSecret(totpSecret, "user-1", totpEnrollmentPurpose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := key.DecryptTOTPSecret(totpCiphertext, "user-1", totpCredentialPurpose); err == nil {
+		t.Fatal("TOTP enrollment secret decrypted as a credential")
+	}
+	if _, err := key.DecryptTOTPSecret(totpCiphertext, "user-2", totpEnrollmentPurpose); err == nil {
+		t.Fatal("TOTP secret decrypted for a different user")
+	}
+	decryptedTOTP, err := key.DecryptTOTPSecret(totpCiphertext, "user-1", totpEnrollmentPurpose)
+	if err != nil || !bytes.Equal(decryptedTOTP, totpSecret) {
+		t.Fatalf("TOTP round trip = (%x, %v)", decryptedTOTP, err)
+	}
 }
 
 func TestInstallationKeyRejectsBroadPermissions(t *testing.T) {

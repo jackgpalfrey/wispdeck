@@ -11,17 +11,19 @@ tested.
 
 An administrative session has one of three assurance states:
 
-- `bootstrap`: password verified, but the account has no passkey yet. This
-  session may only enroll the first passkey and sign out.
-- `mfa`: password and a user-verifying WebAuthn credential were verified.
+- `bootstrap`: password verified, but the account has no second factor yet.
+  This session may only enroll the first passkey or TOTP authenticator and sign
+  out.
+- `mfa`: password and either a user-verifying WebAuthn credential or TOTP code
+  were verified.
 - `recovery`: password and a one-use recovery code were verified. This session
-  may only enroll a replacement passkey, inspect security events, or sign out.
+  may only enroll a replacement factor, inspect security events, or sign out.
 
-Once an account has a passkey, a password alone never creates an administrative
-session. The first passkey is enrolled through a constrained bootstrap session.
-All later passkey changes require a recently created `mfa` session. Sensitive
-operations require authentication within the last ten minutes; otherwise the
-operator signs in again.
+Once an account has any second factor, a password alone never creates an
+administrative session. The first factor is enrolled through a constrained
+bootstrap session. All later factor changes require a recently created `mfa`
+session. Sensitive operations require authentication within the last ten
+minutes; otherwise the operator signs in again.
 
 ## WebAuthn boundary
 
@@ -38,6 +40,25 @@ Credential IDs are stored for lookup and revocation. The complete credential
 record is encrypted with an installation key kept outside the control database.
 WebAuthn user handles are derived with a keyed function from the application
 user ID, so a database writer cannot create a valid user-handle mapping.
+
+## Authenticator-app boundary
+
+TOTP implements RFC 6238 with a 160-bit random secret, HMAC-SHA-1 for broad
+authenticator compatibility, six digits, and a 30-second time step. Validation
+accepts only the current counter and one adjacent counter in each direction.
+Every successfully verified counter is persisted atomically and a counter may
+never be reused, including the code used to confirm enrollment.
+
+The TOTP seed is encrypted with a dedicated installation-key subkey. Enrollment
+state is server-side, encrypted, single-use, bound to the initiating session,
+and expires after ten minutes. Enrollment and login verification are separately
+rate limited. QR codes are rendered by Wispdeck and never sent to a third-party
+service.
+
+TOTP is more widely available than WebAuthn but is not phishing resistant. The
+interface presents passkeys as the preferred method while allowing TOTP as a
+standards-compatible alternative. An account may not delete its final MFA
+factor.
 
 ## Password establishment
 
@@ -56,18 +77,20 @@ It revokes every session and pending ceremony, forcing a clean login.
 
 ## Recovery
 
-Enrolling the first passkey generates ten independent 128-bit recovery codes.
+Enrolling the first passkey or TOTP authenticator generates ten independent
+128-bit recovery codes.
 They are displayed once. Only keyed digests are stored. A code is consumed
 atomically and can never be reused.
 
 Recovery requires both the account password and one unused recovery code. A
 recovery session cannot administer Wispdeck; it can only enroll a replacement
-passkey, inspect relevant security events, or sign out. Enrolling a replacement
+factor, inspect relevant security events, or sign out. Enrolling a replacement
 upgrades the session to `mfa` and generates a fresh recovery-code set.
 
-An operator with local filesystem access may reset passkeys or a password using
-the CLI. Local recovery invalidates every session, passkey, recovery code, and
-pending ceremony. There is no email recovery or security-question bypass.
+An operator with local filesystem access may reset MFA or a password using the
+CLI. Local recovery invalidates every session, passkey, TOTP seed, recovery
+code, and pending ceremony. There is no email recovery or security-question
+bypass.
 
 ## Installation key
 
@@ -75,16 +98,16 @@ The authentication key contains 256 random bits and is loaded from a file that
 must not be stored in the control database. Wispdeck refuses production startup
 if it is absent, malformed, or accessible by group or other users. Losing this
 key makes passkey records and recovery codes unusable, so backups must include
-it. A copied database without the key is not sufficient to add a valid factor.
+it. A copied database without the key is not sufficient to decrypt passkeys or
+TOTP seeds, verify password hashes, or add a valid factor.
 
 ## Sessions and audit
 
 Session identifiers remain opaque 256-bit values stored only as digests.
 Operators can list and revoke their sessions. Password changes, local recovery,
-passkey changes, recovery-code use, and session revocation are audited without
-recording secrets or WebAuthn challenge material.
+factor changes, recovery-code use, and session revocation are audited without
+recording secrets, one-time codes, or WebAuthn challenge material.
 
 Forwarding headers are ignored unless the immediate peer matches an explicitly
 configured trusted-proxy CIDR. When trusted, the effective client address is
 the rightmost untrusted address in the forwarding chain.
-

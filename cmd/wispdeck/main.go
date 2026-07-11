@@ -122,6 +122,10 @@ func serve(args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	totpService, err := auth.NewTOTPService(databaseStore, authService, keyMaterial, passkeyService.RPID())
+	if err != nil {
+		return err
+	}
 	passwordChecker := auth.PasswordChecker(auth.NewStaticPasswordChecker())
 	if !*offlinePasswordCheck {
 		passwordChecker = auth.NewCombinedPasswordChecker(passwordChecker, auth.NewPwnedPasswordChecker(nil))
@@ -132,7 +136,7 @@ func serve(args []string, logger *slog.Logger) error {
 		Logger:            logger,
 		PasswordChecker:   passwordChecker,
 		TrustedProxyCIDRs: trustedProxies,
-	}, authService, passkeyService)
+	}, authService, passkeyService, totpService)
 	if err != nil {
 		return err
 	}

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"image/png"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -24,8 +25,9 @@ import (
 const productionCookieName = "__Host-wispdeck_session"
 
 const (
-	productionLoginCookieName    = "__Host-wispdeck_login"
-	productionCeremonyCookieName = "__Host-wispdeck_ceremony"
+	productionLoginCookieName          = "__Host-wispdeck_login"
+	productionCeremonyCookieName       = "__Host-wispdeck_ceremony"
+	productionTOTPEnrollmentCookieName = "__Host-wispdeck_totp_enrollment"
 )
 
 type Config struct {
@@ -37,17 +39,19 @@ type Config struct {
 }
 
 type Server struct {
-	config             Config
-	auth               *auth.Service
-	passkeys           *auth.PasskeyService
-	passwordChecker    auth.PasswordChecker
-	limiter            *limit.LoginLimiter
-	templates          *template.Template
-	handler            http.Handler
-	cookieName         string
-	loginCookieName    string
-	ceremonyCookieName string
-	trustedProxies     []*net.IPNet
+	config                   Config
+	auth                     *auth.Service
+	passkeys                 *auth.PasskeyService
+	totp                     *auth.TOTPService
+	passwordChecker          auth.PasswordChecker
+	limiter                  *limit.LoginLimiter
+	templates                *template.Template
+	handler                  http.Handler
+	cookieName               string
+	loginCookieName          string
+	ceremonyCookieName       string
+	totpEnrollmentCookieName string
+	trustedProxies           []*net.IPNet
 }
 
 type sessionContextKey struct{}
@@ -55,12 +59,17 @@ type sessionContextKey struct{}
 //go:embed templates/*.html assets/*
 var files embed.FS
 
-func New(config Config, authService *auth.Service, passkeyService *auth.PasskeyService) (*Server, error) {
+func New(
+	config Config,
+	authService *auth.Service,
+	passkeyService *auth.PasskeyService,
+	totpService *auth.TOTPService,
+) (*Server, error) {
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
-	if authService == nil || passkeyService == nil {
-		return nil, errors.New("authentication and passkey services are required")
+	if authService == nil || passkeyService == nil || totpService == nil {
+		return nil, errors.New("authentication, passkey, and TOTP services are required")
 	}
 	if config.PasswordChecker == nil {
 		return nil, errors.New("password checker is required")
@@ -77,21 +86,24 @@ func New(config Config, authService *auth.Service, passkeyService *auth.PasskeyS
 		return nil, err
 	}
 	s := &Server{
-		config:             config,
-		auth:               authService,
-		passkeys:           passkeyService,
-		passwordChecker:    config.PasswordChecker,
-		limiter:            limit.NewLoginLimiter(),
-		templates:          templates,
-		cookieName:         productionCookieName,
-		loginCookieName:    productionLoginCookieName,
-		ceremonyCookieName: productionCeremonyCookieName,
-		trustedProxies:     trustedProxies,
+		config:                   config,
+		auth:                     authService,
+		passkeys:                 passkeyService,
+		totp:                     totpService,
+		passwordChecker:          config.PasswordChecker,
+		limiter:                  limit.NewLoginLimiter(),
+		templates:                templates,
+		cookieName:               productionCookieName,
+		loginCookieName:          productionLoginCookieName,
+		ceremonyCookieName:       productionCeremonyCookieName,
+		totpEnrollmentCookieName: productionTOTPEnrollmentCookieName,
+		trustedProxies:           trustedProxies,
 	}
 	if config.Development {
 		s.cookieName = "wispdeck_session"
 		s.loginCookieName = "wispdeck_login"
 		s.ceremonyCookieName = "wispdeck_ceremony"
+		s.totpEnrollmentCookieName = "wispdeck_totp_enrollment"
 	}
 	s.handler = s.routes()
 	return s, nil
@@ -120,6 +132,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /login", s.login)
 	mux.HandleFunc("GET /login/passkey", s.passkeyLoginPage)
 	mux.HandleFunc("POST /login/recovery", s.recoveryLogin)
+	mux.HandleFunc("POST /login/totp", s.totpLogin)
 	mux.HandleFunc("POST /api/auth/passkey/login/begin", s.beginPasskeyLogin)
 	mux.HandleFunc("POST /api/auth/passkey/login/finish", s.finishPasskeyLogin)
 	mux.Handle("GET /{$}", s.requireSession(http.HandlerFunc(s.dashboard)))
@@ -128,6 +141,10 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /api/auth/passkey/register/begin", s.requireSession(http.HandlerFunc(s.beginPasskeyRegistration)))
 	mux.Handle("POST /api/auth/passkey/register/finish", s.requireSession(http.HandlerFunc(s.finishPasskeyRegistration)))
 	mux.Handle("POST /security/passkeys/delete", s.requireSession(http.HandlerFunc(s.deletePasskey)))
+	mux.Handle("POST /security/totp/setup", s.requireSession(http.HandlerFunc(s.beginTOTPEnrollment)))
+	mux.Handle("GET /security/totp/qr", s.requireSession(http.HandlerFunc(s.totpEnrollmentQR)))
+	mux.Handle("POST /security/totp/confirm", s.requireSession(http.HandlerFunc(s.confirmTOTPEnrollment)))
+	mux.Handle("POST /security/totp/delete", s.requireSession(http.HandlerFunc(s.deleteTOTP)))
 	mux.Handle("POST /security/recovery-codes/rotate", s.requireSession(http.HandlerFunc(s.rotateRecoveryCodes)))
 	mux.Handle("POST /security/sessions/revoke-others", s.requireSession(http.HandlerFunc(s.revokeOtherSessions)))
 	mux.Handle("GET /security/password", s.requireSession(http.HandlerFunc(s.passwordPage)))
@@ -246,11 +263,35 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) passkeyLoginPage(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.opaqueCookie(r, s.loginCookieName); !ok {
+	loginToken, ok := s.opaqueCookie(r, s.loginCookieName)
+	if !ok {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
-	s.render(w, http.StatusOK, "passkey_login.html", struct{ Error string }{})
+	s.renderFactorLogin(w, r, http.StatusOK, loginToken, "")
+}
+
+type factorLoginView struct {
+	Error      string
+	HasPasskey bool
+	HasTOTP    bool
+}
+
+func (s *Server) renderFactorLogin(
+	w http.ResponseWriter,
+	r *http.Request,
+	status int,
+	loginToken, message string,
+) {
+	methods, err := s.passkeys.MethodsForLogin(r.Context(), loginToken)
+	if err != nil {
+		s.clearOpaqueCookie(w, s.loginCookieName)
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	s.render(w, status, "passkey_login.html", factorLoginView{
+		Error: message, HasPasskey: methods.Passkey, HasTOTP: methods.TOTP,
+	})
 }
 
 func (s *Server) beginPasskeyLogin(w http.ResponseWriter, r *http.Request) {
@@ -308,9 +349,8 @@ func (s *Server) recoveryLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	recoveryKey := fmt.Sprintf("recovery:%x", sha256.Sum256([]byte(loginToken)))
 	if !s.limiter.Allow(recoveryKey, s.clientAddress(r)) {
-		s.render(w, http.StatusTooManyRequests, "passkey_login.html", struct{ Error string }{
-			Error: "Too many recovery attempts. Try again later.",
-		})
+		s.renderFactorLogin(w, r, http.StatusTooManyRequests, loginToken,
+			"Too many recovery attempts. Try again later.")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
@@ -320,9 +360,8 @@ func (s *Server) recoveryLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	token, _, err := s.passkeys.Recover(r.Context(), loginToken, r.PostForm.Get("recovery_code"))
 	if err != nil {
-		s.render(w, http.StatusUnauthorized, "passkey_login.html", struct{ Error string }{
-			Error: "Invalid or already used recovery code.",
-		})
+		s.renderFactorLogin(w, r, http.StatusUnauthorized, loginToken,
+			"Invalid or already used recovery code.")
 		return
 	}
 	s.setSessionCookie(w, token)
@@ -331,11 +370,55 @@ func (s *Server) recoveryLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
 }
 
+func (s *Server) totpLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.validBrowserOrigin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	loginToken, ok := s.opaqueCookie(r, s.loginCookieName)
+	if !ok {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	key := fmt.Sprintf("totp:%x", sha256.Sum256([]byte(loginToken)))
+	if !s.limiter.Allow(key, s.clientAddress(r)) {
+		s.renderFactorLogin(w, r, http.StatusTooManyRequests, loginToken,
+			"Too many authenticator attempts. Try again later.")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	token, _, err := s.totp.VerifyLogin(r.Context(), loginToken, r.PostForm.Get("totp_code"))
+	if err != nil {
+		if !errors.Is(err, auth.ErrInvalidTOTP) && !errors.Is(err, auth.ErrInvalidSession) {
+			s.config.Logger.ErrorContext(r.Context(), "TOTP login failed internally", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		s.renderFactorLogin(w, r, http.StatusUnauthorized, loginToken,
+			"Invalid or already used authenticator code.")
+		return
+	}
+	s.setSessionCookie(w, token)
+	s.clearOpaqueCookie(w, s.loginCookieName)
+	s.clearOpaqueCookie(w, s.ceremonyCookieName)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
 func (s *Server) passkeySettings(w http.ResponseWriter, r *http.Request) {
 	session := sessionFromContext(r.Context())
 	records, err := s.passkeys.Passkeys(r.Context(), session.User.ID)
 	if err != nil {
 		s.config.Logger.ErrorContext(r.Context(), "list passkeys", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	totpConfigured, err := s.totp.Configured(r.Context(), session.User.ID)
+	if err != nil {
+		s.config.Logger.ErrorContext(r.Context(), "inspect TOTP configuration", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -356,10 +439,11 @@ func (s *Server) passkeySettings(w http.ResponseWriter, r *http.Request) {
 		Assurance      auth.Assurance
 		CSRFToken      string
 		Passkeys       []auth.PasskeyRecord
+		TOTPConfigured bool
 		Sessions       []auth.SessionSummary
 		CurrentSession [32]byte
 		Events         []auth.AuthEvent
-	}{session.User.Username, session.Assurance, session.CSRFToken, records, sessions, session.TokenHash, events})
+	}{session.User.Username, session.Assurance, session.CSRFToken, records, totpConfigured, sessions, session.TokenHash, events})
 }
 
 func (s *Server) beginPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
@@ -425,7 +509,7 @@ func (s *Server) deletePasskey(w http.ResponseWriter, r *http.Request) {
 	if err := s.passkeys.DeletePasskey(r.Context(), session, r.PostForm.Get("name")); err != nil {
 		message := "The passkey could not be deleted."
 		if errors.Is(err, auth.ErrLastPasskey) {
-			message = "Add another passkey before deleting this one."
+			message = "Add another passkey or an authenticator app before deleting this one."
 		} else if errors.Is(err, auth.ErrRecentMFARequired) {
 			message = "Sign in again before deleting a passkey."
 		}
@@ -433,6 +517,138 @@ func (s *Server) deletePasskey(w http.ResponseWriter, r *http.Request) {
 			Title   string
 			Message string
 		}{"Passkey not deleted", message})
+		return
+	}
+	http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
+}
+
+func (s *Server) beginTOTPEnrollment(w http.ResponseWriter, r *http.Request) {
+	session := sessionFromContext(r.Context())
+	if !s.validBrowserOrigin(r) || !validCSRF(w, r, session.CSRFToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	token, secret, err := s.totp.BeginEnrollment(r.Context(), session)
+	if err != nil {
+		message := "Authenticator setup could not be started."
+		if errors.Is(err, auth.ErrTOTPAlreadyConfigured) {
+			message = "An authenticator app is already configured."
+		} else if errors.Is(err, auth.ErrRecentMFARequired) {
+			message = "Sign in again before changing authentication methods."
+		}
+		s.render(w, http.StatusBadRequest, "message.html", struct {
+			Title   string
+			Message string
+		}{"Authenticator not added", message})
+		return
+	}
+	s.setOpaqueCookie(w, s.totpEnrollmentCookieName, token)
+	s.renderTOTPSetup(w, http.StatusOK, session, secret, "")
+}
+
+func (s *Server) totpEnrollmentQR(w http.ResponseWriter, r *http.Request) {
+	session := sessionFromContext(r.Context())
+	token, ok := s.opaqueCookie(r, s.totpEnrollmentCookieName)
+	if !ok {
+		http.Error(w, "enrollment expired", http.StatusGone)
+		return
+	}
+	key, err := s.totp.EnrollmentKey(r.Context(), session, token)
+	if err != nil {
+		http.Error(w, "enrollment expired", http.StatusGone)
+		return
+	}
+	image, err := key.Image(256, 256)
+	if err != nil {
+		s.config.Logger.ErrorContext(r.Context(), "generate TOTP QR code", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	if err := png.Encode(w, image); err != nil {
+		s.config.Logger.WarnContext(r.Context(), "write TOTP QR code", "error", err)
+	}
+}
+
+func (s *Server) confirmTOTPEnrollment(w http.ResponseWriter, r *http.Request) {
+	session := sessionFromContext(r.Context())
+	if !s.validBrowserOrigin(r) || !validCSRF(w, r, session.CSRFToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	token, ok := s.opaqueCookie(r, s.totpEnrollmentCookieName)
+	if !ok {
+		http.Error(w, "enrollment expired", http.StatusGone)
+		return
+	}
+	enrollmentKey := fmt.Sprintf("totp-enrollment:%x", sha256.Sum256([]byte(token)))
+	if !s.limiter.Allow(enrollmentKey, s.clientAddress(r)) {
+		key, keyErr := s.totp.EnrollmentKey(r.Context(), session, token)
+		if keyErr != nil {
+			http.Error(w, "enrollment expired", http.StatusGone)
+			return
+		}
+		s.renderTOTPSetup(w, http.StatusTooManyRequests, session, key.Secret(),
+			"Too many confirmation attempts. Start setup again later.")
+		return
+	}
+	codes, err := s.totp.ConfirmEnrollment(r.Context(), session, token, r.PostForm.Get("totp_code"))
+	if err != nil {
+		key, keyErr := s.totp.EnrollmentKey(r.Context(), session, token)
+		if keyErr != nil {
+			s.clearOpaqueCookie(w, s.totpEnrollmentCookieName)
+			http.Error(w, "enrollment expired", http.StatusGone)
+			return
+		}
+		message := "Enter the current six-digit code from your authenticator app."
+		if !errors.Is(err, auth.ErrInvalidTOTP) {
+			s.config.Logger.ErrorContext(r.Context(), "confirm TOTP enrollment", "error", err)
+			message = "Authenticator setup could not be completed. No changes were made."
+		}
+		s.renderTOTPSetup(w, http.StatusBadRequest, session, key.Secret(), message)
+		return
+	}
+	s.clearOpaqueCookie(w, s.totpEnrollmentCookieName)
+	if len(codes) > 0 {
+		s.render(w, http.StatusOK, "recovery_codes.html", struct {
+			Codes     []string
+			CSRFToken string
+		}{codes, session.CSRFToken})
+		return
+	}
+	http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
+}
+
+func (s *Server) renderTOTPSetup(
+	w http.ResponseWriter,
+	status int,
+	session auth.Session,
+	secret, message string,
+) {
+	s.render(w, status, "totp_setup.html", struct {
+		Secret    string
+		CSRFToken string
+		Error     string
+	}{secret, session.CSRFToken, message})
+}
+
+func (s *Server) deleteTOTP(w http.ResponseWriter, r *http.Request) {
+	session := sessionFromContext(r.Context())
+	if !s.validBrowserOrigin(r) || !validCSRF(w, r, session.CSRFToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := s.totp.Delete(r.Context(), session); err != nil {
+		message := "The authenticator app could not be removed."
+		if errors.Is(err, auth.ErrLastFactor) {
+			message = "Add a passkey before removing your authenticator app."
+		} else if errors.Is(err, auth.ErrRecentMFARequired) {
+			message = "Sign in again before removing your authenticator app."
+		}
+		s.render(w, http.StatusBadRequest, "message.html", struct {
+			Title   string
+			Message string
+		}{"Authenticator not removed", message})
 		return
 	}
 	http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)

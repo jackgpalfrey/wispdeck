@@ -29,10 +29,11 @@ go build -o wispdeck ./cmd/wispdeck
 ```
 
 Back up both `data/auth.key` and `data/wispdeck.db`. The database alone cannot
-decrypt passkeys or verify recovery codes and peppered password hashes. New
-passwords are screened against a built-in blocklist and the padded Have I Been
-Pwned range API. `--skip-compromised-password-check` is an explicit offline
-override for local CLI operations.
+decrypt passkeys or authenticator-app seeds, verify recovery codes, or verify
+peppered password hashes. New passwords are screened against a built-in
+blocklist and the padded Have I Been Pwned range API.
+`--skip-compromised-password-check` is an explicit offline override for local
+CLI operations.
 
 For a production deployment, terminate TLS at a reverse proxy that preserves
 the original `Host` header, then provide the exact public admin origin:

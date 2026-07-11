@@ -4,6 +4,7 @@ go 1.26.5
 
 require (
 	github.com/go-webauthn/webauthn v0.17.4
+	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/term v0.45.0
 	golang.org/x/text v0.40.0
@@ -11,6 +12,7 @@ require (
 )
 
 require (
+	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect

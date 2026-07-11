@@ -43,6 +43,22 @@ type RecoveryCodeRecord struct {
 	CreatedAt time.Time
 }
 
+type TOTPRecord struct {
+	UserID          string
+	EncryptedSecret []byte
+	CreatedAt       time.Time
+	LastUsedCounter *int64
+}
+
+type TOTPEnrollment struct {
+	TokenHash       [32]byte
+	BindingHash     [32]byte
+	UserID          string
+	EncryptedSecret []byte
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+}
+
 type SessionSummary struct {
 	TokenHash       [32]byte
 	Assurance       Assurance

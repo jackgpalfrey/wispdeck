@@ -24,6 +24,7 @@ var ErrInvalidInstallationKey = errors.New("invalid installation authentication 
 type KeyMaterial struct {
 	credential cipher.AEAD
 	ceremony   cipher.AEAD
+	totp       cipher.AEAD
 	recovery   [32]byte
 	handle     [32]byte
 	password   [32]byte
@@ -40,6 +41,10 @@ func NewKeyMaterial(raw []byte) (*KeyMaterial, error) {
 	ceremonyKey, err := hkdf.Key(sha256.New, raw, nil, "wispdeck ceremony encryption v1", 32)
 	if err != nil {
 		return nil, fmt.Errorf("derive ceremony key: %w", err)
+	}
+	totpKey, err := hkdf.Key(sha256.New, raw, nil, "wispdeck totp secret encryption v1", 32)
+	if err != nil {
+		return nil, fmt.Errorf("derive TOTP encryption key: %w", err)
 	}
 	recoveryKey, err := hkdf.Key(sha256.New, raw, nil, "wispdeck recovery digest v1", 32)
 	if err != nil {
@@ -61,7 +66,11 @@ func NewKeyMaterial(raw []byte) (*KeyMaterial, error) {
 	if err != nil {
 		return nil, err
 	}
-	key := &KeyMaterial{credential: credential, ceremony: ceremony}
+	totpCipher, err := newAEAD(totpKey)
+	if err != nil {
+		return nil, err
+	}
+	key := &KeyMaterial{credential: credential, ceremony: ceremony, totp: totpCipher}
 	copy(key.recovery[:], recoveryKey)
 	copy(key.handle[:], handleKey)
 	copy(key.password[:], passwordKey)
@@ -156,6 +165,14 @@ func (k *KeyMaterial) EncryptCeremony(plaintext []byte, userID, kind string) ([]
 
 func (k *KeyMaterial) DecryptCeremony(ciphertext []byte, userID, kind string) ([]byte, error) {
 	return open(k.ceremony, ciphertext, []byte("ceremony\x00"+kind+"\x00"+userID))
+}
+
+func (k *KeyMaterial) EncryptTOTPSecret(plaintext []byte, userID, purpose string) ([]byte, error) {
+	return seal(k.totp, plaintext, []byte("totp\x00"+purpose+"\x00"+userID))
+}
+
+func (k *KeyMaterial) DecryptTOTPSecret(ciphertext []byte, userID, purpose string) ([]byte, error) {
+	return open(k.totp, ciphertext, []byte("totp\x00"+purpose+"\x00"+userID))
 }
 
 func seal(aead cipher.AEAD, plaintext, additionalData []byte) ([]byte, error) {

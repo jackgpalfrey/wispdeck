@@ -3,17 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Verify passkey — Wispdeck</title>
+  <title>Two-step verification — Wispdeck</title>
   <link rel="stylesheet" href="/assets/admin.css">
   <script src="/assets/webauthn.js" defer></script>
 </head>
 <body>
   <main class="panel">
-    <h1>Verify your passkey</h1>
-    <p class="subtle">Your password was accepted. Complete sign-in with a passkey.</p>
+    <h1>Two-step verification</h1>
+    <p class="subtle">Your password was accepted. Complete sign-in with another factor.</p>
     {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+    {{if .HasPasskey}}
     <p id="passkey-status" class="error hidden" role="alert"></p>
     <button type="button" data-passkey-login>Use passkey</button>
+    {{end}}
+    {{if .HasTOTP}}
+    <form action="/login/totp" method="post">
+      <label for="totp-code">Authenticator code</label>
+      <input id="totp-code" name="totp_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus>
+      <button type="submit"{{if .HasPasskey}} class="secondary"{{end}}>Use authenticator code</button>
+    </form>
+    {{end}}
     <details>
       <summary>Use a recovery code</summary>
       <form action="/login/recovery" method="post">
@@ -25,4 +34,3 @@
   </main>
 </body>
 </html>{{end}}
-

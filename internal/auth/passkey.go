@@ -22,7 +22,7 @@ var (
 	ErrRecentMFARequired    = errors.New("recent multi-factor authentication is required")
 	ErrInvalidRecoveryCode  = errors.New("invalid or used recovery code")
 	ErrPasskeyNotConfigured = errors.New("no passkey is configured")
-	ErrLastPasskey          = errors.New("cannot delete the last passkey")
+	ErrLastPasskey          = ErrLastFactor
 	ErrPasskeyNameExists    = errors.New("passkey name already exists")
 )
 
@@ -37,6 +37,7 @@ type PasskeyRepository interface {
 	UserByID(context.Context, string) (User, error)
 	PasskeysByUser(context.Context, string, string) ([]PasskeyRecord, error)
 	PasskeyCount(context.Context, string, string) (int, error)
+	TOTPConfigured(context.Context, string) (bool, error)
 	UpdatePasskey(context.Context, PasskeyRecord, time.Time) error
 	CompletePasskeyRegistration(context.Context, PasskeyRecord, string, []RecoveryCodeRecord, [32]byte, time.Time) error
 	DeletePasskeyKeepingOne(context.Context, string, string, string) error
@@ -165,7 +166,11 @@ func (s *PasskeyService) AfterPassword(
 	if err != nil {
 		return "", Session{}, false, fmt.Errorf("count passkeys: %w", err)
 	}
-	if count == 0 {
+	hasTOTP, err := s.repository.TOTPConfigured(ctx, user.ID)
+	if err != nil {
+		return "", Session{}, false, fmt.Errorf("check TOTP configuration: %w", err)
+	}
+	if count == 0 && !hasTOTP {
 		token, session, err = s.auth.NewSession(ctx, user, AssuranceBootstrap, clientIP, userAgent)
 		return token, session, false, err
 	}
@@ -183,6 +188,30 @@ func (s *PasskeyService) AfterPassword(
 		return "", Session{}, false, fmt.Errorf("create login transaction: %w", err)
 	}
 	return token, Session{}, true, nil
+}
+
+type LoginMethods struct {
+	Passkey bool
+	TOTP    bool
+}
+
+func (s *PasskeyService) MethodsForLogin(ctx context.Context, loginToken string) (LoginMethods, error) {
+	if !ValidToken(loginToken) {
+		return LoginMethods{}, ErrInvalidSession
+	}
+	transaction, err := s.repository.LoginTransactionByHash(ctx, TokenDigest(loginToken), s.now().UTC())
+	if err != nil {
+		return LoginMethods{}, ErrInvalidSession
+	}
+	count, err := s.repository.PasskeyCount(ctx, transaction.UserID, s.rpID)
+	if err != nil {
+		return LoginMethods{}, fmt.Errorf("count login passkeys: %w", err)
+	}
+	hasTOTP, err := s.repository.TOTPConfigured(ctx, transaction.UserID)
+	if err != nil {
+		return LoginMethods{}, fmt.Errorf("check login TOTP configuration: %w", err)
+	}
+	return LoginMethods{Passkey: count > 0, TOTP: hasTOTP}, nil
 }
 
 func (s *PasskeyService) BeginLogin(
@@ -394,13 +423,7 @@ func (s *PasskeyService) Recover(
 }
 
 func (s *PasskeyService) requireRegistrationSession(session Session) error {
-	if session.Assurance != AssuranceBootstrap && session.Assurance != AssuranceRecovery && session.Assurance != AssuranceMFA {
-		return ErrPasskeyRequired
-	}
-	if s.now().UTC().Sub(session.AuthenticatedAt) > recentAuthentication {
-		return ErrRecentMFARequired
-	}
-	return nil
+	return requireRecentFactorSession(session, s.now().UTC())
 }
 
 type ceremonyPayload struct {
@@ -532,23 +555,7 @@ func (s *PasskeyService) protectCredential(
 }
 
 func (s *PasskeyService) newRecoveryCodes(userID string) ([]string, []RecoveryCodeRecord, string, error) {
-	codes, err := GenerateRecoveryCodes(recoveryCodeCount)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	batchID, err := NewToken()
-	if err != nil {
-		return nil, nil, "", err
-	}
-	now := s.now().UTC()
-	records := make([]RecoveryCodeRecord, len(codes))
-	for i, code := range codes {
-		records[i] = RecoveryCodeRecord{
-			Digest: s.keys.RecoveryCodeDigest(userID, code), UserID: userID,
-			BatchID: batchID, CreatedAt: now,
-		}
-	}
-	return codes, records, batchID, nil
+	return newRecoveryCodeBatch(s.keys, userID, s.now().UTC())
 }
 
 func validatePasskeyName(name string) (string, error) {
