@@ -1,0 +1,24 @@
+{{define "login.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in — Wispdeck</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+</head>
+<body>
+  <main class="panel">
+    <h1>Wispdeck</h1>
+    <p class="subtle">Sign in to administer this installation.</p>
+    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+    <form action="/login" method="post">
+      <label for="username">Username</label>
+      <input id="username" name="username" value="{{.Username}}" autocomplete="username" required autofocus maxlength="64">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>{{end}}
+

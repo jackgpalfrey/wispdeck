@@ -1,0 +1,21 @@
+{{define "dashboard.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wispdeck</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+</head>
+<body>
+  <main class="panel">
+    <h1>Wispdeck</h1>
+    <p>Signed in as <strong>{{.Username}}</strong>.</p>
+    <p class="subtle">Links, sites, and data will live here.</p>
+    <form action="/logout" method="post">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="secondary">Sign out</button>
+    </form>
+  </main>
+</body>
+</html>{{end}}
+

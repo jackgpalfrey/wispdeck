@@ -1,0 +1,60 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+body {
+  display: grid;
+  min-height: 100vh;
+  margin: 0;
+  place-items: center;
+  background: Canvas;
+  color: CanvasText;
+}
+
+.panel {
+  width: min(24rem, calc(100% - 3rem));
+}
+
+form {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+input,
+button {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid GrayText;
+  border-radius: 0.35rem;
+  font: inherit;
+}
+
+button {
+  margin-top: 0.5rem;
+  cursor: pointer;
+  border-color: LinkText;
+  background: LinkText;
+  color: Canvas;
+  font-weight: 650;
+}
+
+button.secondary {
+  background: transparent;
+  color: CanvasText;
+  border-color: GrayText;
+}
+
+.subtle {
+  color: GrayText;
+}
+
+.error {
+  padding: 0.75rem;
+  border-left: 0.25rem solid #c62828;
+  background: color-mix(in srgb, #c62828 12%, Canvas);
+}
+
