@@ -333,14 +333,16 @@ type auditEventView struct {
 }
 
 type dashboardView struct {
-	Username   string
-	CSRFToken  string
-	Assurance  auth.Assurance
-	Role       auth.Role
-	ShowOwners bool
-	Create     shortLinkForm
-	Links      []shortLinkView
-	Audit      []auditEventView
+	Username     string
+	CSRFToken    string
+	Assurance    auth.Assurance
+	Role         auth.Role
+	ShowOwners   bool
+	ShortBaseURL string
+	CreatedURL   string
+	Create       shortLinkForm
+	Links        []shortLinkView
+	Audit        []auditEventView
 }
 
 func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status int, form shortLinkForm) {
@@ -401,12 +403,23 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 			Slug: event.Slug, Action: auditAction(event.Kind),
 		})
 	}
+	createdURL := ""
+	if createdSlug, normalizeErr := shortlink.NormalizeSlug(r.URL.Query().Get("created")); normalizeErr == nil {
+		for _, link := range links {
+			if link.Slug == createdSlug && link.OwnerUserID == actor.UserID && link.Enabled &&
+				(link.ExpiresAt.IsZero() || link.ExpiresAt.After(now)) {
+				createdURL = s.shortLinkURL(createdSlug)
+				break
+			}
+		}
+	}
 	form = withShortLinkFormDefaults(form)
 	s.render(w, status, "dashboard.html", dashboardView{
 		Username: session.User.Username, CSRFToken: session.CSRFToken,
 		Assurance: session.Assurance, Role: session.User.Role,
-		ShowOwners: session.User.Role == auth.RoleSuperuser,
-		Create:     form, Links: views, Audit: audit,
+		ShowOwners:   session.User.Role == auth.RoleSuperuser,
+		ShortBaseURL: s.shortLinkURL(""), CreatedURL: createdURL,
+		Create: form, Links: views, Audit: audit,
 	})
 }
 
@@ -416,8 +429,9 @@ func (s *Server) createShortLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input, form, err := shortLinkInputFromForm(r, true)
+	var created shortlink.Link
 	if err == nil {
-		_, err = s.links.Create(r.Context(), shortLinkActor(session), input)
+		created, err = s.links.Create(r.Context(), shortLinkActor(session), input)
 	}
 	if err != nil {
 		if errors.Is(err, shortlink.ErrForbidden) {
@@ -437,7 +451,7 @@ func (s *Server) createShortLink(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, "/?created="+url.QueryEscape(created.Slug), http.StatusSeeOther)
 }
 
 func (s *Server) updateShortLink(w http.ResponseWriter, r *http.Request) {

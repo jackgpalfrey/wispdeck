@@ -227,9 +227,10 @@ func TestShortLinkCreateResolveAndDisable(t *testing.T) {
 	create.AddCookie(cookie)
 	w := httptest.NewRecorder()
 	server.handler.ServeHTTP(w, create)
-	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/?created=release-notes" {
 		t.Fatalf("create short link = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
 	}
+	createdLocation := w.Header().Get("Location")
 
 	resolve := request(http.MethodGet, "http://admin.example.test/RELEASE-NOTES", nil)
 	w = httptest.NewRecorder()
@@ -238,11 +239,13 @@ func TestShortLinkCreateResolveAndDisable(t *testing.T) {
 		t.Fatalf("resolve short link = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
 	}
 
-	dashboard := request(http.MethodGet, "http://admin.example.test/", nil)
+	dashboard := request(http.MethodGet, "http://admin.example.test"+createdLocation, nil)
 	dashboard.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	server.handler.ServeHTTP(w, dashboard)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/release-notes") || !strings.Contains(w.Body.String(), "1 visit") {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/release-notes") ||
+		!strings.Contains(w.Body.String(), "<strong>1</strong> visit") ||
+		!strings.Contains(w.Body.String(), "Your short link is ready") {
 		t.Fatalf("short-link dashboard = (%d, %q)", w.Code, w.Body.String())
 	}
 	links, err := server.database.ShortLinks(context.Background(), session.User.ID, false)
@@ -529,7 +532,7 @@ func TestShortLinkOwnershipAndSuperuserManagement(t *testing.T) {
 	aliceDashboard.AddCookie(aliceCookie)
 	w = httptest.NewRecorder()
 	server.handler.ServeHTTP(w, aliceDashboard)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Owned by bob") || !strings.Contains(w.Body.String(), "/alice-link") {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Owner <strong>bob</strong>") || !strings.Contains(w.Body.String(), "/alice-link") {
 		t.Fatalf("superuser dashboard = (%d, %q)", w.Code, w.Body.String())
 	}
 

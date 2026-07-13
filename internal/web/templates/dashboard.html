@@ -1,12 +1,34 @@
 {{define "destination-row"}}
 <div class="destination-row" data-destination-row>
-  <label>Public label <span class="subtle">— optional</span>
+  <label class="destination-url">
+    <span class="field-label">Destination URL</span>
+    <input name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" value="{{.URL}}" placeholder="https://example.com/something-useful" required>
+  </label>
+  <label class="destination-label" data-public-label>
+    <span class="field-label">Public label <span class="optional">Optional</span></span>
     <input name="target_label" autocomplete="off" maxlength="120" value="{{.Label}}" placeholder="Documentation">
   </label>
-  <label>Destination URL
-    <input name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" value="{{.URL}}" placeholder="https://example.com/path" required>
+  <button type="button" class="button ghost compact remove-destination" data-remove-destination aria-label="Remove this destination">Remove</button>
+</div>
+{{end}}
+
+{{define "mode-options"}}
+<div class="mode-options" role="radiogroup" aria-label="Link behaviour">
+  <label class="mode-option">
+    <input type="radio" name="mode" value="redirect"{{if eq . "redirect"}} checked{{end}}>
+    <span class="mode-title">Redirect</span>
+    <span class="mode-copy">Send visitors straight to one URL</span>
   </label>
-  <button type="button" class="secondary compact" data-remove-destination>Remove</button>
+  <label class="mode-option">
+    <input type="radio" name="mode" value="index"{{if eq . "index"}} checked{{end}}>
+    <span class="mode-title">Link page</span>
+    <span class="mode-copy">Show a tidy list of destinations</span>
+  </label>
+  <label class="mode-option">
+    <input type="radio" name="mode" value="open_all"{{if eq . "open_all"}} checked{{end}}>
+    <span class="mode-title">Open all</span>
+    <span class="mode-copy">Try to open every URL in new tabs</span>
+  </label>
 </div>
 {{end}}
 
@@ -15,189 +37,311 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Wispdeck</title>
+  <title>Short links — Wispdeck</title>
   <link rel="stylesheet" href="/assets/admin.css">
   <script src="/assets/links.js" defer></script>
 </head>
-<body>
-  <main class="panel wide">
+<body class="dashboard-body">
+  <main class="panel dashboard-shell">
     <header class="page-header">
-      <div>
-        <h1>Wispdeck</h1>
-        <p class="subtle">Signed in as <strong>{{.Username}}</strong>.</p>
-      </div>
-      <nav>
-        <a href="/security/passkeys">Account and security</a>
+      <a class="brand" href="/" aria-label="Wispdeck home">
+        <span class="brand-mark" aria-hidden="true">W</span>
+        <span>Wispdeck</span>
+      </a>
+      <nav aria-label="Account navigation">
         {{if eq .Role "superuser"}}<a href="/settings/users">Users</a>{{end}}
+        <a href="/security/passkeys">Account</a>
+        <span class="user-chip">{{.Username}}</span>
       </nav>
     </header>
 
-    {{if eq .Assurance "password"}}
-      <p class="notice">MFA is not enabled. This account is protected only by its password. <a href="/security/passkeys">Set up MFA</a>.</p>
-    {{end}}
+    <div class="dashboard-content">
+      {{if eq .Assurance "password"}}
+        <div class="notice compact-notice">
+          <span>MFA is not enabled. This account uses password-only sign-in.</span>
+          <a href="/security/passkeys">Review security</a>
+        </div>
+      {{end}}
 
-    <section>
-      <h2>Create a short link</h2>
-      <form action="/links/create" method="post" data-link-form>
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        {{if .Create.Error}}<p class="error">{{.Create.Error}}</p>{{end}}
+      {{if .CreatedURL}}
+      <div class="success-banner" role="status">
+        <div>
+          <strong>Your short link is ready</strong>
+          <a href="{{.CreatedURL}}" target="_blank" rel="noreferrer">{{.CreatedURL}}</a>
+        </div>
+        <div class="success-actions">
+          <button type="button" class="button secondary compact" data-copy="{{.CreatedURL}}">Copy link</button>
+          <a class="button ghost compact" href="/">Dismiss</a>
+        </div>
+      </div>
+      {{end}}
 
-        <div class="form-grid">
-          <label>Private title <span class="subtle">— optional</span>
-            <input name="title" autocomplete="off" maxlength="120" value="{{.Create.Title}}" placeholder="Release documentation">
-          </label>
-          <label>Short name <span class="subtle">— optional</span>
-            <input name="slug" autocomplete="off" minlength="1" maxlength="48" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?" placeholder="Generated automatically" value="{{.Create.Slug}}">
-          </label>
-          <label>Mode
-            <select name="mode" data-mode-select>
-              <option value="redirect"{{if eq .Create.Mode "redirect"}} selected{{end}}>Redirect to one destination</option>
-              <option value="index"{{if eq .Create.Mode "index"}} selected{{end}}>Show an index of destinations</option>
-              <option value="open_all"{{if eq .Create.Mode "open_all"}} selected{{end}}>Try to open every destination</option>
-            </select>
-          </label>
-          <label>Expires at <span class="subtle">— UTC, optional</span>
-            <input name="expires_at" type="datetime-local" value="{{.Create.ExpiresAt}}">
-          </label>
+      <section class="create-card" aria-labelledby="create-heading">
+        <div class="section-heading create-heading">
+          <div>
+            <span class="eyebrow">Short links</span>
+            <h1 id="create-heading">Make a link easier to share</h1>
+            <p>Paste a destination. Wispdeck will handle the short name.</p>
+          </div>
         </div>
 
-        <label>Private notes <span class="subtle">— optional, never public</span>
-          <textarea name="description" maxlength="1000" rows="3">{{.Create.Description}}</textarea>
-        </label>
+        <form action="/links/create" method="post" class="create-form" data-link-form data-current-mode="{{.Create.Mode}}">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          {{if .Create.Error}}<p class="error" role="alert" data-form-error>{{.Create.Error}}</p>{{end}}
 
-        <fieldset data-destinations-editor>
-          <legend>Destinations</legend>
-          <p class="subtle">Labels are public on index and open-all pages. Redirect mode requires exactly one destination.</p>
-          <div data-destination-rows>
-            {{range .Create.Destinations}}{{template "destination-row" .}}{{end}}
-          </div>
-          <button type="button" class="secondary" data-add-destination>Add destination</button>
-        </fieldset>
-
-        <button type="submit">Create short link</button>
-      </form>
-    </section>
-
-    <section>
-      <h2>{{if .ShowOwners}}All short links{{else}}Your short links{{end}}</h2>
-      {{if .Links}}
-      <ul class="records links">
-        {{range .Links}}
-        <li>
-          <div class="record-heading">
-            <div>
-              <strong>{{if .Title}}{{.Title}}{{else}}/{{.Slug}}{{end}}</strong>
-              {{if .Title}}<span class="subtle"> · /{{.Slug}}</span>{{end}}
+          <fieldset class="destinations-editor" data-destinations-editor>
+            <legend class="sr-only">Link destinations</legend>
+            <div data-destination-rows>
+              {{range .Create.Destinations}}{{template "destination-row" .}}{{end}}
             </div>
-            <div class="record-badges">
-              <span class="status mode">{{.ModeLabel}}</span>
-              {{if .Expired}}<span class="status disabled">Expired</span>{{else if .Enabled}}<span class="status enabled">Active</span>{{else}}<span class="status disabled">Disabled</span>{{end}}
-            </div>
-          </div>
+            <button type="button" class="button add-destination" data-add-destination>
+              <span aria-hidden="true">+</span> Add another destination
+            </button>
+            <p class="helper" data-destination-helper>A direct link can have one destination.</p>
+          </fieldset>
 
-          <div class="copy-row">
-            <a href="{{.PublicURL}}" rel="noreferrer">{{.PublicURL}}</a>
-            <button type="button" class="secondary compact" data-copy="{{.PublicURL}}">Copy</button>
-          </div>
-          {{if .Description}}<p class="notes">{{.Description}}</p>{{end}}
-          <span class="subtle">{{if $.ShowOwners}}Owned by {{.OwnerUsername}} · {{end}}{{len .Destinations}} destination{{if ne (len .Destinations) 1}}s{{end}} · {{.VisitCount}} visit{{if ne .VisitCount 1}}s{{end}} · expires {{.ExpiresAt}} · last used {{.LastVisitedAt}}</span>
-
-          <details>
-            <summary>Manage</summary>
-            <form action="/links/update" method="post" data-link-form>
-              <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-              <input type="hidden" name="link_id" value="{{.ID}}">
-              <div class="form-grid">
-                <label>Private title
-                  <input name="title" autocomplete="off" maxlength="120" value="{{.Title}}">
-                </label>
-                <label>Mode
-                  <select name="mode" data-mode-select>
-                    <option value="redirect"{{if eq .Mode "redirect"}} selected{{end}}>Redirect to one destination</option>
-                    <option value="index"{{if eq .Mode "index"}} selected{{end}}>Show an index of destinations</option>
-                    <option value="open_all"{{if eq .Mode "open_all"}} selected{{end}}>Try to open every destination</option>
-                  </select>
-                </label>
-                <label>Expires at <span class="subtle">— UTC</span>
-                  <input name="expires_at" type="datetime-local" value="{{.ExpiresInput}}">
-                </label>
-              </div>
-              <label>Private notes
-                <textarea name="description" maxlength="1000" rows="3">{{.Description}}</textarea>
-              </label>
-              <fieldset data-destinations-editor>
-                <legend>Destinations</legend>
-                <div data-destination-rows>
-                  {{range .Destinations}}{{template "destination-row" .}}{{end}}
-                </div>
-                <button type="button" class="secondary" data-add-destination>Add destination</button>
-              </fieldset>
-              <button type="submit" class="secondary">Save changes</button>
-            </form>
-
-            {{if .DailyStats}}
-            <details class="nested">
-              <summary>Daily visits (last 30 days)</summary>
-              <table>
-                <thead><tr><th>Date (UTC)</th><th>Visits</th></tr></thead>
-                <tbody>{{range .DailyStats}}<tr><td>{{.Day}}</td><td>{{.Visits}}</td></tr>{{end}}</tbody>
-              </table>
-            </details>
-            {{end}}
-
-            <div class="actions">
-              <form action="/links/state" method="post">
-                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                <input type="hidden" name="link_id" value="{{.ID}}">
-                {{if .Enabled}}
-                  <input type="hidden" name="enabled" value="false">
-                  <button type="submit" class="secondary">Disable</button>
-                {{else}}
-                  <input type="hidden" name="enabled" value="true">
-                  <button type="submit" class="secondary">Enable</button>
-                {{end}}
-              </form>
-              <form action="/links/retire" method="post" class="retire-form">
-                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                <input type="hidden" name="link_id" value="{{.ID}}">
-                <label class="confirmation"><input type="checkbox" name="confirm" value="yes" required> Retire this name permanently</label>
-                <button type="submit" class="danger">Retire link</button>
-              </form>
+          <details class="progressive-panel behavior-panel" data-behavior-panel{{if ne .Create.Mode "redirect"}} open{{end}}>
+            <summary>
+              <span>
+                <strong>Link behaviour</strong>
+                <small data-mode-summary>{{if eq .Create.Mode "index"}}Link page{{else if eq .Create.Mode "open_all"}}Open all{{else}}Direct redirect{{end}}</small>
+              </span>
+              <span class="summary-action">Change</span>
+            </summary>
+            <div class="progressive-content">
+              {{template "mode-options" .Create.Mode}}
+              <p class="helper" data-mode-explanation>Visitors are sent straight to your destination.</p>
             </div>
           </details>
-        </li>
+
+          <details class="progressive-panel"{{if or .Create.Slug .Create.Title .Create.Description .Create.ExpiresAt}} open{{end}}>
+            <summary>
+              <span>
+                <strong>Advanced options</strong>
+                <small>Custom path, expiry and private details</small>
+              </span>
+              <span class="summary-action"><span class="when-closed">Show</span><span class="when-open">Hide</span></span>
+            </summary>
+            <div class="progressive-content advanced-grid">
+              <label class="full-width">
+                <span class="field-label">Custom short path <span class="optional">Optional</span></span>
+                <span class="input-prefix"><span>{{.ShortBaseURL}}</span><input name="slug" autocomplete="off" minlength="1" maxlength="48" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?" placeholder="generated" value="{{.Create.Slug}}"></span>
+                <span class="helper">Lowercase letters, numbers and hyphens. Leave blank for a secure random path.</span>
+              </label>
+              <label>
+                <span class="field-label">Private title <span class="optional">Optional</span></span>
+                <input name="title" autocomplete="off" maxlength="120" value="{{.Create.Title}}" placeholder="Release notes">
+              </label>
+              <label>
+                <span class="field-label">Expiry <span class="optional">Optional · UTC</span></span>
+                <input name="expires_at" type="datetime-local" value="{{.Create.ExpiresAt}}">
+              </label>
+              <label class="full-width">
+                <span class="field-label">Private notes <span class="optional">Optional · never public</span></span>
+                <textarea name="description" maxlength="1000" rows="3" placeholder="Anything useful for future you">{{.Create.Description}}</textarea>
+              </label>
+            </div>
+          </details>
+
+          <div class="create-action">
+            <p class="helper">New links are active immediately.</p>
+            <button type="submit" class="button primary" data-create-button>Create short link</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="library" aria-labelledby="library-heading">
+        <div class="section-heading library-heading">
+          <div>
+            <span class="eyebrow">Library</span>
+            <h2 id="library-heading">{{if .ShowOwners}}All short links{{else}}Your short links{{end}}</h2>
+            <p>{{len .Links}} link{{if ne (len .Links) 1}}s{{end}}</p>
+          </div>
+          {{if .Links}}
+          <label class="filter-control">
+            <span class="sr-only">Filter links</span>
+            <input type="search" placeholder="Find a link…" autocomplete="off" data-link-filter>
+          </label>
+          {{end}}
+        </div>
+
+        {{if .Links}}
+        <p class="sr-only" aria-live="polite" data-filter-status></p>
+        <ul class="link-list" data-link-list>
+          {{range .Links}}
+          <li class="link-card" data-link-record>
+            <div class="link-card-header">
+              <div class="link-identity">
+                <div class="link-title-row">
+                  <h3>{{if .Title}}{{.Title}}{{else}}/{{.Slug}}{{end}}</h3>
+                  <div class="record-badges">
+                    <span class="status mode">{{.ModeLabel}}</span>
+                    {{if .Expired}}<span class="status disabled"><span class="status-dot"></span>Expired</span>{{else if .Enabled}}<span class="status enabled"><span class="status-dot"></span>Active</span>{{else}}<span class="status disabled"><span class="status-dot"></span>Disabled</span>{{end}}
+                  </div>
+                </div>
+                {{if .Title}}<span class="slug-label">/{{.Slug}}</span>{{end}}
+              </div>
+              <div class="link-actions">
+                <a class="button ghost compact" href="{{.PublicURL}}" target="_blank" rel="noreferrer">Visit</a>
+                <button type="button" class="button secondary compact" data-copy="{{.PublicURL}}">Copy</button>
+              </div>
+            </div>
+
+            <a class="public-url" href="{{.PublicURL}}" target="_blank" rel="noreferrer">{{.PublicURL}}</a>
+            {{if .Description}}<p class="notes">{{.Description}}</p>{{end}}
+            <div class="link-metrics">
+              <span><strong>{{.VisitCount}}</strong> visit{{if ne .VisitCount 1}}s{{end}}</span>
+              <span><strong>{{len .Destinations}}</strong> destination{{if ne (len .Destinations) 1}}s{{end}}</span>
+              <span>Last used <strong>{{.LastVisitedAt}}</strong></span>
+              {{if ne .ExpiresAt "Never"}}<span>Expires <strong>{{.ExpiresAt}}</strong></span>{{end}}
+              {{if $.ShowOwners}}<span>Owner <strong>{{.OwnerUsername}}</strong></span>{{end}}
+            </div>
+
+            <details class="manage-panel">
+              <summary><span>Edit and manage</span><span class="summary-action"><span class="when-closed">Open</span><span class="when-open">Close</span></span></summary>
+              <div class="manage-content">
+                <form action="/links/update" method="post" class="edit-form" data-link-form data-current-mode="{{.Mode}}">
+                  <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                  <input type="hidden" name="link_id" value="{{.ID}}">
+
+                  <fieldset class="destinations-editor" data-destinations-editor>
+                    <legend>Destinations</legend>
+                    <div data-destination-rows>
+                      {{range .Destinations}}{{template "destination-row" .}}{{end}}
+                    </div>
+                    <button type="button" class="button add-destination" data-add-destination><span aria-hidden="true">+</span> Add another destination</button>
+                    <p class="helper" data-destination-helper></p>
+                  </fieldset>
+
+                  <details class="progressive-panel behavior-panel" data-behavior-panel{{if ne .Mode "redirect"}} open{{end}}>
+                    <summary>
+                      <span><strong>Link behaviour</strong><small data-mode-summary>{{.ModeLabel}}</small></span>
+                      <span class="summary-action">Change</span>
+                    </summary>
+                    <div class="progressive-content">
+                      {{template "mode-options" .Mode}}
+                      <p class="helper" data-mode-explanation></p>
+                    </div>
+                  </details>
+
+                  <details class="progressive-panel"{{if or .Title .Description .ExpiresInput}} open{{end}}>
+                    <summary>
+                      <span><strong>Details and expiry</strong><small>Private management information</small></span>
+                      <span class="summary-action"><span class="when-closed">Show</span><span class="when-open">Hide</span></span>
+                    </summary>
+                    <div class="progressive-content advanced-grid">
+                      <label>
+                        <span class="field-label">Private title <span class="optional">Optional</span></span>
+                        <input name="title" autocomplete="off" maxlength="120" value="{{.Title}}">
+                      </label>
+                      <label>
+                        <span class="field-label">Expiry <span class="optional">Optional · UTC</span></span>
+                        <input name="expires_at" type="datetime-local" value="{{.ExpiresInput}}">
+                      </label>
+                      <label class="full-width">
+                        <span class="field-label">Private notes <span class="optional">Optional · never public</span></span>
+                        <textarea name="description" maxlength="1000" rows="3">{{.Description}}</textarea>
+                      </label>
+                      <p class="helper full-width">The short path <strong>/{{.Slug}}</strong> is permanent. Retire this link and create another to use a different path.</p>
+                    </div>
+                  </details>
+
+                  <div class="save-row">
+                    <button type="submit" class="button primary compact">Save changes</button>
+                  </div>
+                </form>
+
+                {{if .DailyStats}}
+                <details class="stats-panel">
+                  <summary><span>Daily visits</span><span class="summary-action">Last 30 days</span></summary>
+                  <div class="table-scroll">
+                    <table>
+                      <thead><tr><th>Date (UTC)</th><th>Visits</th></tr></thead>
+                      <tbody>{{range .DailyStats}}<tr><td>{{.Day}}</td><td>{{.Visits}}</td></tr>{{end}}</tbody>
+                    </table>
+                  </div>
+                </details>
+                {{end}}
+
+                <div class="link-settings-row">
+                  <div>
+                    <strong>{{if .Enabled}}Pause this link{{else}}Reactivate this link{{end}}</strong>
+                    <p>{{if .Enabled}}Visitors will see a not-found page until you reactivate it.{{else}}The link will begin working again immediately.{{end}}</p>
+                  </div>
+                  <form action="/links/state" method="post">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                    <input type="hidden" name="link_id" value="{{.ID}}">
+                    {{if .Enabled}}
+                      <input type="hidden" name="enabled" value="false">
+                      <button type="submit" class="button secondary compact">Disable link</button>
+                    {{else}}
+                      <input type="hidden" name="enabled" value="true">
+                      <button type="submit" class="button secondary compact">Enable link</button>
+                    {{end}}
+                  </form>
+                </div>
+
+                <details class="danger-panel">
+                  <summary>Danger zone</summary>
+                  <div class="danger-content">
+                    <p>Retiring a link permanently reserves <strong>/{{.Slug}}</strong>. Nobody can reuse it later.</p>
+                    <form action="/links/retire" method="post" class="retire-form">
+                      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                      <input type="hidden" name="link_id" value="{{.ID}}">
+                      <label class="confirmation"><input type="checkbox" name="confirm" value="yes" required> I understand this short path cannot be reused</label>
+                      <button type="submit" class="button danger compact">Retire link</button>
+                    </form>
+                  </div>
+                </details>
+              </div>
+            </details>
+          </li>
+          {{end}}
+        </ul>
+        <div class="empty-filter hidden" data-filter-empty>
+          <strong>No matching links</strong>
+          <p>Try another title, path, owner or destination.</p>
+        </div>
+        {{else}}
+          <div class="empty-state">
+            <div class="empty-mark" aria-hidden="true">↗</div>
+            <strong>No short links yet</strong>
+            <p>Paste your first destination above. You can be sharing it in a few seconds.</p>
+          </div>
         {{end}}
-      </ul>
-      {{else}}
-        <p class="subtle">No short links yet.</p>
+      </section>
+
+      {{if .Audit}}
+      <details class="audit-panel">
+        <summary><span>Superuser activity</span><span class="summary-action">{{len .Audit}} recent changes</span></summary>
+        <ul class="records compact-records">
+          {{range .Audit}}
+          <li><span><strong>{{.ActorUsername}}</strong> {{.Action}} /{{.Slug}}{{if $.ShowOwners}} for {{.OwnerUsername}}{{end}}</span><span class="subtle">{{.OccurredAt}}</span></li>
+          {{end}}
+        </ul>
+      </details>
       {{end}}
-    </section>
 
-    {{if .Audit}}
-    <section>
-      <h2>Superuser changes</h2>
-      <ul class="records compact-records">
-        {{range .Audit}}
-        <li><span><strong>{{.ActorUsername}}</strong> {{.Action}} /{{.Slug}}{{if $.ShowOwners}} for {{.OwnerUsername}}{{end}}</span><span class="subtle">{{.OccurredAt}}</span></li>
-        {{end}}
-      </ul>
-    </section>
-    {{end}}
-
-    <form action="/logout" method="post" class="sign-out">
-      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <button type="submit" class="secondary">Sign out</button>
-    </form>
+      <footer class="dashboard-footer">
+        <span>Wispdeck</span>
+        <form action="/logout" method="post">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="text-button">Sign out</button>
+        </form>
+      </footer>
+    </div>
 
     <template id="destination-row-template">
       <div class="destination-row" data-destination-row>
-        <label>Public label <span class="subtle">— optional</span>
+        <label class="destination-url">
+          <span class="field-label">Destination URL</span>
+          <input name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" placeholder="https://example.com/something-useful" required>
+        </label>
+        <label class="destination-label" data-public-label>
+          <span class="field-label">Public label <span class="optional">Optional</span></span>
           <input name="target_label" autocomplete="off" maxlength="120" placeholder="Documentation">
         </label>
-        <label>Destination URL
-          <input name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" placeholder="https://example.com/path" required>
-        </label>
-        <button type="button" class="secondary compact" data-remove-destination>Remove</button>
+        <button type="button" class="button ghost compact remove-destination" data-remove-destination aria-label="Remove this destination">Remove</button>
       </div>
     </template>
   </main>
