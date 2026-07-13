@@ -5,16 +5,19 @@ demand.
 
 The implemented control plane includes production-oriented local authentication,
 user and superuser management, and owner-scoped short links. Users can choose a
-custom short name or generate one, update destinations, disable links, and see
-redirect counts. Superusers can manage every user's links. See
+custom short name or generate one, update destinations, set expiry times,
+disable links, and see privacy-preserving daily visit totals. Superusers can
+manage every user's links. See
 [`docs/security-model.md`](docs/security-model.md) and
 [`docs/authentication.md`](docs/authentication.md) for the contracts that shape
 it.
 
-Short links use editable `302 Found` redirects. Names are deployment-wide,
-case-insensitive, and permanently reserved once created so an old shared URL
-cannot later be claimed by someone else. Only absolute HTTP and HTTPS
-destinations are accepted.
+Links have three modes: an editable `302 Found` redirect to one destination, a
+public index of several destinations, or an open-all page that attempts to open
+several tabs and falls back to a user-clicked button when the browser blocks
+them. Names are deployment-wide, case-insensitive, and permanently reserved
+once created so an old shared URL cannot later be claimed by someone else. Only
+absolute HTTP and HTTPS destinations are accepted.
 
 ## Development
 

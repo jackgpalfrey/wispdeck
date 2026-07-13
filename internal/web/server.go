@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/wispdeck/wispdeck/internal/auth"
 	"github.com/wispdeck/wispdeck/internal/limit"
@@ -145,7 +146,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /{$}", s.requireSession(http.HandlerFunc(s.dashboard)))
 	mux.Handle("POST /logout", s.requireSession(http.HandlerFunc(s.logout)))
 	mux.Handle("POST /links/create", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.createShortLink))))
-	mux.Handle("POST /links/target", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.updateShortLinkTarget))))
+	mux.Handle("POST /links/update", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.updateShortLink))))
 	mux.Handle("POST /links/state", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.setShortLinkState))))
 	mux.Handle("POST /links/retire", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.retireShortLink))))
 	mux.Handle("GET /security/passkeys", s.requireSession(http.HandlerFunc(s.passkeySettings)))
@@ -283,22 +284,52 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	s.renderDashboard(w, r, http.StatusOK, shortLinkForm{})
 }
 
+type shortLinkDestinationForm struct {
+	Label string
+	URL   string
+}
+
 type shortLinkForm struct {
-	Slug      string
-	TargetURL string
-	Error     string
+	Slug         string
+	Title        string
+	Description  string
+	Mode         shortlink.Mode
+	ExpiresAt    string
+	Destinations []shortLinkDestinationForm
+	Error        string
+}
+
+type dailyStatView struct {
+	Day    string
+	Visits int64
 }
 
 type shortLinkView struct {
 	ID            string
 	OwnerUsername string
 	Slug          string
-	TargetURL     string
+	Title         string
+	Description   string
+	Mode          shortlink.Mode
+	ModeLabel     string
+	Destinations  []shortLinkDestinationForm
 	PublicURL     string
 	Enabled       bool
+	Expired       bool
 	VisitCount    int64
 	CreatedAt     string
+	ExpiresAt     string
+	ExpiresInput  string
 	LastVisitedAt string
+	DailyStats    []dailyStatView
+}
+
+type auditEventView struct {
+	OccurredAt    string
+	ActorUsername string
+	OwnerUsername string
+	Slug          string
+	Action        string
 }
 
 type dashboardView struct {
@@ -309,34 +340,73 @@ type dashboardView struct {
 	ShowOwners bool
 	Create     shortLinkForm
 	Links      []shortLinkView
+	Audit      []auditEventView
 }
 
 func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status int, form shortLinkForm) {
 	session := sessionFromContext(r.Context())
-	links, err := s.links.List(r.Context(), shortLinkActor(session))
+	actor := shortLinkActor(session)
+	links, err := s.links.List(r.Context(), actor)
 	if err != nil {
 		s.config.Logger.ErrorContext(r.Context(), "list short links", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	auditEvents, err := s.links.AuditEvents(r.Context(), actor, 25)
+	if err != nil {
+		s.config.Logger.ErrorContext(r.Context(), "list short-link audit events", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	now := time.Now().UTC()
 	views := make([]shortLinkView, 0, len(links))
 	for _, link := range links {
 		lastVisited := "Never"
 		if !link.LastVisitedAt.IsZero() {
 			lastVisited = link.LastVisitedAt.Format("2006-01-02 15:04 UTC")
 		}
-		views = append(views, shortLinkView{
+		expiresAt := "Never"
+		expiresInput := ""
+		expired := false
+		if !link.ExpiresAt.IsZero() {
+			expiresAt = link.ExpiresAt.Format("2006-01-02 15:04 UTC")
+			expiresInput = link.ExpiresAt.Format("2006-01-02T15:04")
+			expired = !link.ExpiresAt.After(now)
+		}
+		view := shortLinkView{
 			ID: link.ID, OwnerUsername: link.OwnerUsername, Slug: link.Slug,
-			TargetURL: link.TargetURL, PublicURL: s.shortLinkURL(link.Slug),
-			Enabled: link.Enabled, VisitCount: link.VisitCount,
-			CreatedAt: link.CreatedAt.Format("2006-01-02 15:04 UTC"), LastVisitedAt: lastVisited,
+			Title: link.Title, Description: link.Description, Mode: link.Mode,
+			ModeLabel: shortLinkModeLabel(link.Mode), PublicURL: s.shortLinkURL(link.Slug),
+			Enabled: link.Enabled, Expired: expired, VisitCount: link.VisitCount,
+			CreatedAt: link.CreatedAt.Format("2006-01-02 15:04 UTC"),
+			ExpiresAt: expiresAt, ExpiresInput: expiresInput, LastVisitedAt: lastVisited,
+		}
+		for _, destination := range link.Destinations {
+			view.Destinations = append(view.Destinations, shortLinkDestinationForm{
+				Label: destination.Label, URL: destination.URL,
+			})
+		}
+		for _, stat := range link.DailyStats {
+			view.DailyStats = append(view.DailyStats, dailyStatView{
+				Day: stat.Day.Format("2006-01-02"), Visits: stat.Visits,
+			})
+		}
+		views = append(views, view)
+	}
+	audit := make([]auditEventView, 0, len(auditEvents))
+	for _, event := range auditEvents {
+		audit = append(audit, auditEventView{
+			OccurredAt:    event.OccurredAt.Format("2006-01-02 15:04 UTC"),
+			ActorUsername: event.ActorUsername, OwnerUsername: event.OwnerUsername,
+			Slug: event.Slug, Action: auditAction(event.Kind),
 		})
 	}
+	form = withShortLinkFormDefaults(form)
 	s.render(w, status, "dashboard.html", dashboardView{
 		Username: session.User.Username, CSRFToken: session.CSRFToken,
 		Assurance: session.Assurance, Role: session.User.Role,
 		ShowOwners: session.User.Role == auth.RoleSuperuser,
-		Create:     form, Links: views,
+		Create:     form, Links: views, Audit: audit,
 	})
 }
 
@@ -345,8 +415,10 @@ func (s *Server) createShortLink(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	form := shortLinkForm{Slug: r.PostForm.Get("slug"), TargetURL: r.PostForm.Get("target_url")}
-	_, err := s.links.Create(r.Context(), shortLinkActor(session), form.Slug, form.TargetURL)
+	input, form, err := shortLinkInputFromForm(r, true)
+	if err == nil {
+		_, err = s.links.Create(r.Context(), shortLinkActor(session), input)
+	}
 	if err != nil {
 		if errors.Is(err, shortlink.ErrForbidden) {
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -368,16 +440,17 @@ func (s *Server) createShortLink(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func (s *Server) updateShortLinkTarget(w http.ResponseWriter, r *http.Request) {
+func (s *Server) updateShortLink(w http.ResponseWriter, r *http.Request) {
 	session, ok := s.validShortLinkForm(w, r)
 	if !ok {
 		return
 	}
-	err := s.links.UpdateTarget(
-		r.Context(), shortLinkActor(session), r.PostForm.Get("link_id"), r.PostForm.Get("target_url"),
-	)
+	input, _, err := shortLinkInputFromForm(r, false)
+	if err == nil {
+		err = s.links.Update(r.Context(), shortLinkActor(session), r.PostForm.Get("link_id"), input)
+	}
 	if err != nil {
-		s.renderShortLinkError(w, r, err, "Destination not changed")
+		s.renderShortLinkError(w, r, err, "Link not updated")
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -423,7 +496,7 @@ func (s *Server) retireShortLink(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) validShortLinkForm(w http.ResponseWriter, r *http.Request) (auth.Session, bool) {
 	session := sessionFromContext(r.Context())
-	if !s.validBrowserOrigin(r) || !validCSRF(w, r, session.CSRFToken) {
+	if !s.validBrowserOrigin(r) || !validCSRFWithLimit(w, r, session.CSRFToken, 512<<10) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return auth.Session{}, false
 	}
@@ -452,7 +525,10 @@ func (s *Server) renderShortLinkError(w http.ResponseWriter, r *http.Request, er
 func shortLinkErrorMessage(err error) (string, bool) {
 	for _, known := range []error{
 		shortlink.ErrInvalidSlug, shortlink.ErrReservedSlug, shortlink.ErrSlugUnavailable,
-		shortlink.ErrInvalidTarget, shortlink.ErrTargetTooLong,
+		shortlink.ErrInvalidTarget, shortlink.ErrTargetTooLong, shortlink.ErrInvalidMode,
+		shortlink.ErrInvalidDestinations, shortlink.ErrDuplicateTarget,
+		shortlink.ErrInvalidTitle, shortlink.ErrInvalidDescription,
+		shortlink.ErrInvalidLabel, shortlink.ErrInvalidExpiry,
 	} {
 		if errors.Is(err, known) {
 			return known.Error(), true
@@ -462,7 +538,7 @@ func shortLinkErrorMessage(err error) (string, bool) {
 }
 
 func (s *Server) resolveShortLink(w http.ResponseWriter, r *http.Request) {
-	link, err := s.links.Resolve(r.Context(), r.PathValue("slug"))
+	link, err := s.links.Resolve(r.Context(), r.PathValue("slug"), r.Method == http.MethodGet)
 	if errors.Is(err, shortlink.ErrNotFound) {
 		http.NotFound(w, r)
 		return
@@ -472,7 +548,125 @@ func (s *Server) resolveShortLink(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, link.TargetURL, http.StatusFound)
+	switch link.Mode {
+	case shortlink.ModeRedirect:
+		http.Redirect(w, r, link.Destinations[0].URL, http.StatusFound)
+	case shortlink.ModeIndex, shortlink.ModeOpenAll:
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+		view := publicShortLinkView(link)
+		templateName := "shortlink_index.html"
+		if link.Mode == shortlink.ModeOpenAll {
+			templateName = "shortlink_open_all.html"
+		}
+		s.render(w, http.StatusOK, templateName, view)
+	default:
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}
+}
+
+type publicDestinationView struct {
+	Label string
+	URL   string
+}
+
+type publicLinkView struct {
+	Slug         string
+	Destinations []publicDestinationView
+}
+
+func publicShortLinkView(link shortlink.Link) publicLinkView {
+	view := publicLinkView{Slug: link.Slug}
+	for _, destination := range link.Destinations {
+		label := destination.Label
+		if label == "" {
+			if parsed, err := url.Parse(destination.URL); err == nil {
+				label = parsed.Hostname()
+			}
+			if label == "" {
+				label = destination.URL
+			}
+		}
+		view.Destinations = append(view.Destinations, publicDestinationView{
+			Label: label, URL: destination.URL,
+		})
+	}
+	return view
+}
+
+func shortLinkInputFromForm(r *http.Request, creating bool) (shortlink.Input, shortLinkForm, error) {
+	form := shortLinkForm{
+		Slug: r.PostForm.Get("slug"), Title: r.PostForm.Get("title"),
+		Description: r.PostForm.Get("description"), Mode: shortlink.Mode(r.PostForm.Get("mode")),
+		ExpiresAt: r.PostForm.Get("expires_at"),
+	}
+	labels := r.PostForm["target_label"]
+	targets := r.PostForm["target_url"]
+	if len(labels) != len(targets) {
+		return shortlink.Input{}, form, shortlink.ErrInvalidDestinations
+	}
+	destinations := make([]shortlink.Destination, 0, len(targets))
+	for i := range targets {
+		form.Destinations = append(form.Destinations, shortLinkDestinationForm{
+			Label: labels[i], URL: targets[i],
+		})
+		destinations = append(destinations, shortlink.Destination{
+			Label: labels[i], URL: targets[i], Position: i,
+		})
+	}
+	var expiresAt time.Time
+	var err error
+	if form.ExpiresAt != "" {
+		expiresAt, err = time.ParseInLocation("2006-01-02T15:04", form.ExpiresAt, time.UTC)
+		if err != nil {
+			return shortlink.Input{}, form, shortlink.ErrInvalidExpiry
+		}
+	}
+	input := shortlink.Input{
+		Title: form.Title, Description: form.Description, Mode: form.Mode,
+		Destinations: destinations, ExpiresAt: expiresAt,
+	}
+	if creating {
+		input.Slug = form.Slug
+	}
+	return input, form, nil
+}
+
+func withShortLinkFormDefaults(form shortLinkForm) shortLinkForm {
+	if form.Mode == "" {
+		form.Mode = shortlink.ModeRedirect
+	}
+	if len(form.Destinations) == 0 {
+		form.Destinations = []shortLinkDestinationForm{{}}
+	}
+	return form
+}
+
+func shortLinkModeLabel(mode shortlink.Mode) string {
+	switch mode {
+	case shortlink.ModeRedirect:
+		return "Redirect"
+	case shortlink.ModeIndex:
+		return "Index"
+	case shortlink.ModeOpenAll:
+		return "Open all"
+	default:
+		return "Unknown"
+	}
+}
+
+func auditAction(kind shortlink.AuditKind) string {
+	switch kind {
+	case shortlink.AuditUpdated:
+		return "updated"
+	case shortlink.AuditEnabled:
+		return "enabled"
+	case shortlink.AuditDisabled:
+		return "disabled"
+	case shortlink.AuditRetired:
+		return "retired"
+	default:
+		return "changed"
+	}
 }
 
 func shortLinkActor(session auth.Session) shortlink.Actor {
@@ -1431,7 +1625,11 @@ func (s *Server) validBrowserOrigin(r *http.Request) bool {
 }
 
 func validCSRF(w http.ResponseWriter, r *http.Request, expected string) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	return validCSRFWithLimit(w, r, expected, 16<<10)
+}
+
+func validCSRFWithLimit(w http.ResponseWriter, r *http.Request, expected string, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if err := r.ParseForm(); err != nil {
 		return false
 	}

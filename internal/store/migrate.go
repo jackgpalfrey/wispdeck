@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
@@ -55,6 +55,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err := migrationSix(ctx, tx); err != nil {
 				return err
 			}
+		case 7:
+			if err := migrationSeven(ctx, tx); err != nil {
+				return err
+			}
 		}
 		version++
 		if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
@@ -66,6 +70,88 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrationSeven(ctx context.Context, tx *sql.Tx) error {
+	const schema = `
+		DROP INDEX short_links_owner_created;
+		ALTER TABLE short_links RENAME TO short_links_v6;
+
+		CREATE TABLE short_links (
+			id TEXT PRIMARY KEY CHECK(length(id) = 32),
+			owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			slug TEXT NOT NULL COLLATE NOCASE UNIQUE
+				CHECK(length(slug) BETWEEN 1 AND 48)
+				CHECK(slug = lower(slug))
+				CHECK(slug NOT GLOB '*[^a-z0-9-]*')
+				CHECK(substr(slug, 1, 1) <> '-' AND substr(slug, -1, 1) <> '-'),
+			title TEXT NOT NULL DEFAULT '' CHECK(length(title) <= 120),
+			description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 1000),
+			mode TEXT NOT NULL CHECK(mode IN ('redirect', 'index', 'open_all')),
+			enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			expires_at INTEGER,
+			deleted_at INTEGER,
+			CHECK(created_at <= updated_at),
+			CHECK(expires_at IS NULL OR created_at < expires_at),
+			CHECK(deleted_at IS NULL OR (created_at <= deleted_at AND enabled = 0))
+		) STRICT;
+		INSERT INTO short_links (
+			id, owner_user_id, slug, mode, enabled, created_at, updated_at,
+			expires_at, deleted_at
+		)
+		SELECT id, owner_user_id, slug, 'redirect', enabled, created_at,
+		       updated_at, NULL, deleted_at
+		FROM short_links_v6;
+
+		CREATE TABLE short_link_destinations (
+			id TEXT PRIMARY KEY CHECK(length(id) = 32),
+			link_id TEXT NOT NULL REFERENCES short_links(id) ON DELETE CASCADE,
+			position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 24),
+			label TEXT NOT NULL DEFAULT '' CHECK(length(label) <= 120),
+			target_url TEXT NOT NULL CHECK(length(target_url) BETWEEN 1 AND 4096),
+			UNIQUE(link_id, position)
+		) STRICT;
+		INSERT INTO short_link_destinations (id, link_id, position, target_url)
+			SELECT id, id, 0, target_url FROM short_links_v6;
+
+		CREATE TABLE short_link_daily_stats (
+			link_id TEXT NOT NULL REFERENCES short_links(id) ON DELETE CASCADE,
+			day INTEGER NOT NULL CHECK(day % 86400 = 0),
+			visits INTEGER NOT NULL CHECK(visits > 0),
+			last_visited_at INTEGER NOT NULL,
+			PRIMARY KEY(link_id, day)
+		) WITHOUT ROWID, STRICT;
+		INSERT INTO short_link_daily_stats (link_id, day, visits, last_visited_at)
+		SELECT id,
+		       CAST(COALESCE(last_visited_at, created_at) / 86400 AS INTEGER) * 86400,
+		       visit_count,
+		       COALESCE(last_visited_at, created_at)
+		FROM short_links_v6
+		WHERE visit_count > 0;
+
+		CREATE TABLE short_link_audit_events (
+			id INTEGER PRIMARY KEY,
+			occurred_at INTEGER NOT NULL,
+			actor_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			link_id TEXT NOT NULL REFERENCES short_links(id) ON DELETE RESTRICT,
+			slug TEXT NOT NULL CHECK(length(slug) BETWEEN 1 AND 48),
+			kind TEXT NOT NULL CHECK(kind IN ('updated', 'enabled', 'disabled', 'retired'))
+		) STRICT;
+		CREATE INDEX short_link_audit_owner_time
+			ON short_link_audit_events(owner_user_id, occurred_at DESC, id DESC);
+
+		DROP TABLE short_links_v6;
+		CREATE INDEX short_links_owner_created
+			ON short_links(owner_user_id, created_at DESC, id)
+			WHERE deleted_at IS NULL;
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 7: %w", err)
 	}
 	return nil
 }

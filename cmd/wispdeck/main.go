@@ -134,6 +134,8 @@ func serve(args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	stopVisitFlusher := startVisitFlusher(shortLinkService, logger)
+	defer stopVisitFlusher()
 	passwordChecker := auth.PasswordChecker(auth.NewStaticPasswordChecker())
 	if !*offlinePasswordCheck {
 		passwordChecker = auth.NewCombinedPasswordChecker(passwordChecker, auth.NewPwnedPasswordChecker(nil))
@@ -173,6 +175,38 @@ func serve(args []string, logger *slog.Logger) error {
 		return fmt.Errorf("serve HTTP: %w", err)
 	}
 	return nil
+}
+
+func startVisitFlusher(service *shortlink.Service, logger *slog.Logger) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err := service.FlushVisits(flushCtx)
+				flushCancel()
+				if err != nil {
+					logger.Error("flush short-link visits", "error", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer flushCancel()
+		if err := service.FlushVisits(flushCtx); err != nil {
+			logger.Error("final short-link visit flush", "error", err)
+		}
+	}
 }
 
 type stringListFlag []string

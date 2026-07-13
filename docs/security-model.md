@@ -29,19 +29,35 @@ immediately.
 
 Short-link names are globally unique within a deployment and contain only
 lowercase ASCII letters, numbers, and hyphens. Wispdeck reserves its application
-route names before they can become public redirects. Destinations must be
-absolute HTTP or HTTPS URLs, may not contain embedded credentials, and are
-validated again during resolution so corrupted storage cannot inject an unsafe
-`Location` header.
+route names before they can become public links. Destinations must be absolute
+HTTP or HTTPS URLs, may not contain embedded credentials, and are validated
+again during resolution so corrupted storage cannot inject an unsafe
+navigation target. A link is either a single editable `302` redirect, a public
+index of up to 25 ordered destinations, or an open-all page. Open-all first
+attempts to create blank tabs, severs each tab's opener, and then navigates it;
+blocked destinations remain behind an explicit retry button and a normal list.
+
+Private titles and notes are selected only by management queries. Public
+resolution does not load them from SQLite, so landing-page templates cannot
+accidentally expose them. Destination labels are explicitly public. Expired,
+disabled, retired, unknown, and invalid links share the same public `404`
+response.
 
 Users can list and mutate only their own links. Superusers can list and mutate
 all links. Ownership predicates are part of the same SQL statement as each
 mutation, rather than a separate check vulnerable to a time-of-check/time-of-use
 race. All unsafe requests retain the application origin and CSRF requirements.
-Disabled, retired, unknown, and invalid links share the same public `404`
-response. Retiring a link preserves its name as a tombstone, preventing an old
-shared URL from being claimed by another user. Redirect resolution atomically
-increments a count and records the most recent use.
+Cross-owner changes by a superuser are recorded atomically without storing
+destinations or private notes. Retiring a link preserves its name as a
+tombstone, preventing an old shared URL from being claimed by another user.
+
+Public resolution is read-only. GET visits enter a bounded in-memory aggregate
+and are flushed to UTC daily totals every five seconds and during graceful
+shutdown; HEAD requests are not counted. The statistics tables contain only a
+link ID, day, count, and most recent visit time—never client addresses,
+referrers, or user agents. A crash may lose the most recent unflushed counts,
+which is preferred to making public traffic contend with authentication and
+management writes.
 
 ## Passwords and bootstrap
 

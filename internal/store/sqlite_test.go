@@ -164,6 +164,11 @@ func TestMigrationsInvalidatePasswordOnlySessionsAndReachCurrentSchema(t *testin
 	if err := database.db.QueryRow(`SELECT count(*) FROM short_links`).Scan(&count); err != nil {
 		t.Fatalf("schema v6 table missing: %v", err)
 	}
+	for _, table := range []string{"short_link_destinations", "short_link_daily_stats", "short_link_audit_events"} {
+		if err := database.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatalf("schema v7 table %s missing: %v", table, err)
+		}
+	}
 	if err := database.db.QueryRow(`SELECT version FROM schema_version`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}

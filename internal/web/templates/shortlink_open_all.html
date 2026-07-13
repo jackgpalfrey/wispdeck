@@ -1,0 +1,21 @@
+{{define "shortlink_open_all.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Open shared links — Wispdeck</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+  <script src="/assets/open-all.js" defer></script>
+</head>
+<body>
+  <main class="panel">
+    <h1>Opening shared links</h1>
+    <p class="subtle">Wispdeck will try to open every destination. If your browser blocks any tabs, use the button below.</p>
+    <button type="button" data-open-all>Open all</button>
+    <p class="subtle" data-open-all-status aria-live="polite"></p>
+    <ul class="public-links" data-open-all-list>
+      {{range .Destinations}}<li><a href="{{.URL}}" target="_blank" rel="noreferrer" data-open-target>{{.Label}}</a><span class="subtle">{{.URL}}</span></li>{{end}}
+    </ul>
+  </main>
+</body>
+</html>{{end}}

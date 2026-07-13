@@ -31,6 +31,7 @@ type testServer struct {
 	keys        *auth.KeyMaterial
 	passkeys    *auth.PasskeyService
 	totp        *auth.TOTPService
+	links       *shortlink.Service
 }
 
 func newTestServer(t *testing.T, production bool) testServer {
@@ -89,7 +90,7 @@ func newTestServer(t *testing.T, production bool) testServer {
 	return testServer{
 		handler: server.Handler(), authService: authService,
 		database: database, keys: keyMaterial, passkeys: passkeyService,
-		totp: totpService,
+		totp: totpService, links: shortLinkService,
 	}
 }
 
@@ -104,6 +105,16 @@ func request(method, target string, body url.Values) *http.Request {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 	return r
+}
+
+func directShortLinkValues(csrf, slug, target string) url.Values {
+	return url.Values{
+		"csrf_token":   {csrf},
+		"slug":         {slug},
+		"mode":         {string(shortlink.ModeRedirect)},
+		"target_label": {""},
+		"target_url":   {target},
+	}
 }
 
 func responseCookie(t *testing.T, response *http.Response, name string) *http.Cookie {
@@ -210,11 +221,8 @@ func TestShortLinkCreateResolveAndDisable(t *testing.T) {
 	server := newTestServer(t, false)
 	cookie, session := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
 
-	create := request(http.MethodPost, "http://admin.example.test/links/create", url.Values{
-		"csrf_token": {session.CSRFToken},
-		"slug":       {"Release-Notes"},
-		"target_url": {"https://example.com/releases/v1?from=wispdeck"},
-	})
+	create := request(http.MethodPost, "http://admin.example.test/links/create",
+		directShortLinkValues(session.CSRFToken, "Release-Notes", "https://example.com/releases/v1?from=wispdeck"))
 	create.Header.Set("Origin", "http://admin.example.test")
 	create.AddCookie(cookie)
 	w := httptest.NewRecorder()
@@ -234,7 +242,7 @@ func TestShortLinkCreateResolveAndDisable(t *testing.T) {
 	dashboard.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	server.handler.ServeHTTP(w, dashboard)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/release-notes") || !strings.Contains(w.Body.String(), "1 redirect") {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/release-notes") || !strings.Contains(w.Body.String(), "1 visit") {
 		t.Fatalf("short-link dashboard = (%d, %q)", w.Code, w.Body.String())
 	}
 	links, err := server.database.ShortLinks(context.Background(), session.User.ID, false)
@@ -282,9 +290,8 @@ func TestShortLinkCreateResolveAndDisable(t *testing.T) {
 		t.Fatalf("retire short link = (%d, %q)", w.Code, w.Body.String())
 	}
 
-	reclaim := request(http.MethodPost, "http://admin.example.test/links/create", url.Values{
-		"csrf_token": {session.CSRFToken}, "slug": {"release-notes"}, "target_url": {"https://replacement.example"},
-	})
+	reclaim := request(http.MethodPost, "http://admin.example.test/links/create",
+		directShortLinkValues(session.CSRFToken, "release-notes", "https://replacement.example"))
 	reclaim.Header.Set("Origin", "http://admin.example.test")
 	reclaim.AddCookie(cookie)
 	w = httptest.NewRecorder()
@@ -306,25 +313,35 @@ func TestShortLinkFormsValidateOriginSlugAndTarget(t *testing.T) {
 		body   string
 	}{
 		{
-			name: "missing origin",
-			values: url.Values{
-				"csrf_token": {session.CSRFToken}, "slug": {"valid"}, "target_url": {"https://example.com"},
-			},
+			name:   "missing origin",
+			values: directShortLinkValues(session.CSRFToken, "valid", "https://example.com"),
 			status: http.StatusForbidden,
 		},
 		{
-			name: "reserved slug",
-			values: url.Values{
-				"csrf_token": {session.CSRFToken}, "slug": {"login"}, "target_url": {"https://example.com"},
-			},
+			name:   "reserved slug",
+			values: directShortLinkValues(session.CSRFToken, "login", "https://example.com"),
 			origin: "http://admin.example.test", status: http.StatusBadRequest, body: "reserved by Wispdeck",
 		},
 		{
-			name: "unsafe target",
-			values: url.Values{
-				"csrf_token": {session.CSRFToken}, "slug": {"unsafe"}, "target_url": {"javascript:alert(1)"},
-			},
+			name:   "unsafe target",
+			values: directShortLinkValues(session.CSRFToken, "unsafe", "javascript:alert(1)"),
 			origin: "http://admin.example.test", status: http.StatusBadRequest, body: "absolute HTTP or HTTPS URL",
+		},
+		{
+			name: "multiple redirect targets",
+			values: url.Values{
+				"csrf_token": {session.CSRFToken}, "slug": {"many"}, "mode": {"redirect"},
+				"target_label": {"One", "Two"}, "target_url": {"https://one.example", "https://two.example"},
+			},
+			origin: "http://admin.example.test", status: http.StatusBadRequest, body: "between 1 and 25 destinations",
+		},
+		{
+			name: "past expiry",
+			values: url.Values{
+				"csrf_token": {session.CSRFToken}, "slug": {"expired"}, "mode": {"redirect"},
+				"target_label": {""}, "target_url": {"https://example.com"}, "expires_at": {"2000-01-01T00:00"},
+			},
+			origin: "http://admin.example.test", status: http.StatusBadRequest, body: "future UTC",
 		},
 	}
 	for _, test := range tests {
@@ -340,6 +357,116 @@ func TestShortLinkFormsValidateOriginSlugAndTarget(t *testing.T) {
 				t.Fatalf("response = (%d, %q)", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestIndexAndOpenAllModesKeepPrivateMetadataPrivateAndBufferVisits(t *testing.T) {
+	server := newTestServer(t, false)
+	cookie, session := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+	indexValues := url.Values{
+		"csrf_token": {session.CSRFToken}, "slug": {"reading"}, "mode": {"index"},
+		"title": {"SECRET private reading list"}, "description": {"SECRET internal notes"},
+		"target_label": {"Documentation", "Source code"},
+		"target_url":   {"https://docs.example/path", "https://source.example/repository"},
+	}
+	create := request(http.MethodPost, "http://admin.example.test/links/create", indexValues)
+	create.Header.Set("Origin", "http://admin.example.test")
+	create.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, create)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("create index link = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	head := request(http.MethodHead, "http://admin.example.test/reading", nil)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, head)
+	if w.Code != http.StatusOK {
+		t.Fatalf("index HEAD status = %d", w.Code)
+	}
+	if err := server.links.FlushVisits(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	links, err := server.database.ShortLinks(context.Background(), session.User.ID, false)
+	if err != nil || len(links) != 1 || links[0].VisitCount != 0 {
+		t.Fatalf("HEAD-counted links = (%#v, %v)", links, err)
+	}
+
+	index := request(http.MethodGet, "http://admin.example.test/reading", nil)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, index)
+	body := w.Body.String()
+	if w.Code != http.StatusOK || w.Header().Get("X-Robots-Tag") != "noindex, nofollow" ||
+		!strings.Contains(body, "Documentation") || !strings.Contains(body, "Source code") ||
+		strings.Contains(body, "SECRET") {
+		t.Fatalf("public index = (%d, %#v, %q)", w.Code, w.Header(), body)
+	}
+	if err := server.links.FlushVisits(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	links, err = server.database.ShortLinks(context.Background(), session.User.ID, false)
+	if err != nil || len(links) != 1 || links[0].VisitCount != 1 {
+		t.Fatalf("GET visit count = (%#v, %v)", links, err)
+	}
+	stats, err := server.database.ShortLinkDailyStats(context.Background(), session.User.ID, false, time.Now().UTC().Add(-24*time.Hour))
+	if err != nil || len(stats) != 1 || stats[0].Visits != 1 {
+		t.Fatalf("daily visit stats = (%#v, %v)", stats, err)
+	}
+	dashboard := request(http.MethodGet, "http://admin.example.test/", nil)
+	dashboard.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, dashboard)
+	body = w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, "data-copy=") ||
+		!strings.Contains(body, "SECRET private reading list") ||
+		!strings.Contains(body, stats[0].Day.Format("2006-01-02")) {
+		t.Fatalf("management metadata and stats = (%d, %q)", w.Code, body)
+	}
+
+	openValues := url.Values{
+		"csrf_token": {session.CSRFToken}, "slug": {"workspace"}, "mode": {"open_all"},
+		"title": {"SECRET open-all title"}, "description": {"SECRET open-all notes"},
+		"target_label": {"Mail", "Calendar"},
+		"target_url":   {"https://mail.example", "https://calendar.example"},
+	}
+	create = request(http.MethodPost, "http://admin.example.test/links/create", openValues)
+	create.Header.Set("Origin", "http://admin.example.test")
+	create.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, create)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("create open-all link = (%d, %q)", w.Code, w.Body.String())
+	}
+	openAll := request(http.MethodGet, "http://admin.example.test/workspace", nil)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, openAll)
+	body = w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, "/assets/open-all.js") ||
+		!strings.Contains(body, "data-open-all") || !strings.Contains(body, "data-open-target") ||
+		strings.Contains(body, "SECRET") {
+		t.Fatalf("public open-all page = (%d, %q)", w.Code, body)
+	}
+}
+
+func TestExpiredShortLinkIsPubliclyNotFound(t *testing.T) {
+	server := newTestServer(t, false)
+	ctx := context.Background()
+	user, err := server.database.UserByUsername(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdAt := time.Now().UTC().Add(-2 * time.Hour)
+	if _, err := server.database.CreateShortLink(ctx, user.ID, shortlink.Link{
+		Slug: "old", Mode: shortlink.ModeRedirect, ExpiresAt: createdAt.Add(time.Hour),
+		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
+	}, createdAt); err != nil {
+		t.Fatal(err)
+	}
+	r := request(http.MethodGet, "http://admin.example.test/old", nil)
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expired link status = %d", w.Code)
 	}
 }
 
@@ -362,11 +489,17 @@ func TestShortLinkOwnershipAndSuperuserManagement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	aliceLink, err := server.database.CreateShortLink(ctx, alice.ID, "alice-link", "https://alice.example", time.Now().UTC())
+	aliceLink, err := server.database.CreateShortLink(ctx, alice.ID, shortlink.Link{
+		Slug: "alice-link", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://alice.example"}},
+	}, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobLink, err := server.database.CreateShortLink(ctx, bob.ID, "bob-link", "https://bob.example", time.Now().UTC())
+	bobLink, err := server.database.CreateShortLink(ctx, bob.ID, shortlink.Link{
+		Slug: "bob-link", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://bob.example"}},
+	}, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,9 +513,9 @@ func TestShortLinkOwnershipAndSuperuserManagement(t *testing.T) {
 		t.Fatalf("Bob dashboard = (%d, %q)", w.Code, w.Body.String())
 	}
 
-	crossOwnerUpdate := request(http.MethodPost, "http://admin.example.test/links/target", url.Values{
-		"csrf_token": {bobSession.CSRFToken}, "link_id": {aliceLink.ID}, "target_url": {"https://changed.example"},
-	})
+	crossOwnerValues := directShortLinkValues(bobSession.CSRFToken, "", "https://changed.example")
+	crossOwnerValues.Set("link_id", aliceLink.ID)
+	crossOwnerUpdate := request(http.MethodPost, "http://admin.example.test/links/update", crossOwnerValues)
 	crossOwnerUpdate.Header.Set("Origin", "http://admin.example.test")
 	crossOwnerUpdate.AddCookie(bobCookie)
 	w = httptest.NewRecorder()
@@ -416,6 +549,14 @@ func TestShortLinkOwnershipAndSuperuserManagement(t *testing.T) {
 	server.handler.ServeHTTP(w, resolveBob)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("superuser-disabled link status = %d", w.Code)
+	}
+
+	bobDashboard = request(http.MethodGet, "http://admin.example.test/", nil)
+	bobDashboard.AddCookie(bobCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, bobDashboard)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "alice</strong> disabled /bob-link") {
+		t.Fatalf("cross-owner audit dashboard = (%d, %q)", w.Code, w.Body.String())
 	}
 }
 
