@@ -8,7 +8,8 @@ Wispdeck has two different trust zones:
 
 1. The **application origin** serves Wispdeck's management interface and may
    also serve short-link redirects.
-2. **Content origins** serve user-uploaded HTML, CSS, and JavaScript.
+2. **Content origins** serve user-uploaded HTML, CSS, and JavaScript. Public
+   sites have stable origins; every private preview gets a fresh origin.
 
 User content is untrusted. It must never be served from the application origin.
 The application session cookie is host-only and is never scoped to a parent domain.
@@ -58,6 +59,55 @@ link ID, day, count, and most recent visit time—never client addresses,
 referrers, or user agents. A crash may lose the most recent unflushed counts,
 which is preferred to making public traffic contend with authentication and
 management writes.
+
+## Hosted sites
+
+Hosted sites and short links use one transactional, deployment-wide public-name
+registry. A site's name remains reserved to its original owner when the site is
+disabled. The owner or a superuser can upload another release and republish the
+same site, but the name cannot be reassigned. The application-origin `/<name>`
+and `/<name>/...` aliases issue permanent redirects to the matching content
+origin; they never serve uploaded bytes.
+
+The only accepted workload is a pre-built static ZIP bundle. Archive ingestion
+rejects traversal, absolute and non-canonical paths, backslashes, symlinks,
+encrypted entries, case-insensitive path collisions, reserved `/_wispdeck/`
+paths, missing root `index.html`, and configured size/count limit violations.
+File and bundle digests are recalculated before storage. Releases and files are
+immutable; publishing and rollback only switch the site's release pointer in a
+transaction. There is no executable server-side site code or per-site idle
+process.
+
+Every hosted name has its own public content origin, and every preview grant has
+a fresh unguessable content origin. The application, public content, and preview
+host routers are separated before application authentication or route handling,
+and unrecognised hosts receive `421 Misdirected Request`. Application cookies
+and preview cookies are host-only `__Host-` cookies in production. Hosted content
+does not receive the application CSP, because its scripts and styles are the
+payload, but it also cannot access application responses through the same-origin
+policy. Application mutations continue to require exact-origin validation and a
+session-bound CSRF token; sibling subdomains are not trusted merely because
+they are same-site.
+
+Uploads begin as drafts. An unauthenticated public site origin exposes only a
+generic login gate. Preview authorization crosses origins through a two-minute,
+single-use random grant; its digest is stored, and exchanging it on a fresh
+origin beneath the configured preview domain creates an eight-hour host-only
+preview session. The grant URL is immediately cleaned. The fresh origin prevents
+a service worker or browser storage installed by a public release or older draft
+from controlling a new preview. Preview responses are private and non-cacheable.
+Publishing a draft invalidates its preview sessions because no draft remains.
+Preview responses also deny framing and cross-origin resource use so another
+content origin cannot embed a private draft. If a published release and a new
+draft both exist, ordinary visitors receive only the published release while an
+authorized preview can switch between Current and Draft.
+
+The preview toolbar is convenience UI injected into previewed HTML. It is not a
+security boundary: uploaded HTML can restyle, remove, or imitate it. The toolbar
+therefore contains no publication capability. Its Publish link returns the user
+to the trusted application origin, where the normal session, origin, CSRF, and
+ownership checks apply. The complete hosting and deployment contract is in
+`hosting.md`.
 
 ## Passwords and bootstrap
 
@@ -110,8 +160,10 @@ contain 128 random bits.
 ## Out of scope for this slice
 
 - TLS termination and reverse-proxy configuration
-- Uploaded-site isolation and content security policy
 - Data API authorization
+- Server-side site code, build execution, and runtime sandboxing
+- Custom domains
+- Per-owner storage quotas and automated abuse controls
 - Email or support-mediated account recovery
 - Distributed rate limiting
 - Configurable audit-log retention policy

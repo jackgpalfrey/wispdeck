@@ -1,6 +1,7 @@
 package web
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,6 +23,7 @@ import (
 	totplib "github.com/pquerna/otp/totp"
 	"github.com/wispdeck/wispdeck/internal/auth"
 	"github.com/wispdeck/wispdeck/internal/shortlink"
+	"github.com/wispdeck/wispdeck/internal/site"
 	"github.com/wispdeck/wispdeck/internal/store"
 )
 
@@ -32,6 +35,7 @@ type testServer struct {
 	passkeys    *auth.PasskeyService
 	totp        *auth.TOTPService
 	links       *shortlink.Service
+	sites       *site.Service
 }
 
 func newTestServer(t *testing.T, production bool) testServer {
@@ -78,19 +82,24 @@ func newTestServer(t *testing.T, production bool) testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	siteService, err := site.NewService(database)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server, err := New(Config{
 		AppOrigin:       origin,
+		SiteDomain:      "sites.example.test",
 		Development:     !production,
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		PasswordChecker: auth.NewStaticPasswordChecker(),
-	}, authService, passkeyService, totpService, shortLinkService)
+	}, authService, passkeyService, totpService, shortLinkService, siteService)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return testServer{
 		handler: server.Handler(), authService: authService,
 		database: database, keys: keyMaterial, passkeys: passkeyService,
-		totp: totpService, links: shortLinkService,
+		totp: totpService, links: shortLinkService, sites: siteService,
 	}
 }
 
@@ -186,6 +195,40 @@ func TestAdminBoundaryRejectsWrongHostAndSetsHeaders(t *testing.T) {
 	server.handler.ServeHTTP(w, r)
 	if w.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("wrong-host status = %d", w.Code)
+	}
+}
+
+func TestValidSiteDomain(t *testing.T) {
+	tests := []struct {
+		value string
+		valid bool
+	}{
+		{value: "example.com", valid: true},
+		{value: "sites.example.com", valid: true},
+		{value: "localhost", valid: true},
+		{value: "", valid: false},
+		{value: "https://example.com", valid: false},
+		{value: "*.example.com", valid: false},
+		{value: "example.com:8443", valid: false},
+		{value: "Example.com", valid: false},
+		{value: "127.0.0.1", valid: false},
+		{value: "-sites.example.com", valid: false},
+	}
+	for _, test := range tests {
+		t.Run(test.value, func(t *testing.T) {
+			if got := validSiteDomain(test.value); got != test.valid {
+				t.Fatalf("validSiteDomain(%q) = %t, want %t", test.value, got, test.valid)
+			}
+		})
+	}
+	origin, err := url.Parse("http://localhost:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateConfig(Config{
+		AppOrigin: origin, SiteDomain: "localhost", PreviewDomain: "localhost", Development: true,
+	}); err == nil {
+		t.Fatal("accepted identical public and preview domains")
 	}
 }
 
@@ -302,6 +345,454 @@ func TestShortLinkCreateResolveAndDisable(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Fatalf("retired-name reclaim status = %d, body = %q", w.Code, w.Body.String())
 	}
+}
+
+func TestHostedSiteDraftPreviewPublishRollbackAndAliases(t *testing.T) {
+	server := newTestServer(t, false)
+	cookie, session := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+
+	create := request(http.MethodPost, "http://admin.example.test/sites/create", url.Values{
+		"csrf_token": {session.CSRFToken}, "name": {"Docs"}, "title": {"Product docs"},
+	})
+	create.Header.Set("Origin", "http://admin.example.test")
+	create.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, create)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/?site_created=docs#sites" {
+		t.Fatalf("create site = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+
+	values := directShortLinkValues(session.CSRFToken, "docs", "https://example.com")
+	link := request(http.MethodPost, "http://admin.example.test/links/create", values)
+	link.Header.Set("Origin", "http://admin.example.test")
+	link.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, link)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("site/link global-name collision = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	sites, err := server.database.Sites(context.Background(), session.User.ID, false)
+	if err != nil || len(sites) != 1 {
+		t.Fatalf("created sites = (%#v, %v)", sites, err)
+	}
+	firstZIP := webZIP(t, map[string]string{
+		"index.html":       "<!doctype html><title>One</title><h1>Version one</h1>",
+		"guide/index.html": "<h1>Guide one</h1>",
+	})
+	upload := multipartSiteRequest(t, session.CSRFToken, sites[0].ID, "docs", firstZIP)
+	upload.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, upload)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("upload first draft = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	alias := request(http.MethodGet, "http://admin.example.test/docs?from=short", nil)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, alias)
+	if w.Code != http.StatusPermanentRedirect || w.Header().Get("Location") != "http://docs.sites.example.test/?from=short" {
+		t.Fatalf("root site alias = (%d, %q)", w.Code, w.Header().Get("Location"))
+	}
+	nestedAlias := request(http.MethodGet, "http://admin.example.test/docs/guide/?from=short", nil)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, nestedAlias)
+	if w.Code != http.StatusPermanentRedirect || w.Header().Get("Location") != "http://docs.sites.example.test/guide/?from=short" {
+		t.Fatalf("nested site alias = (%d, %q)", w.Code, w.Header().Get("Location"))
+	}
+
+	draft := siteRequest(http.MethodGet, "http://docs.sites.example.test/", "docs.sites.example.test")
+	draft.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, draft)
+	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "currently a draft") || strings.Contains(w.Body.String(), "Version one") {
+		t.Fatalf("public draft gate = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	preview := request(http.MethodPost, "http://admin.example.test/sites/preview", url.Values{
+		"csrf_token": {session.CSRFToken}, "site_name": {"docs"},
+	})
+	preview.Header.Set("Origin", "http://admin.example.test")
+	preview.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, preview)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("create preview grant = (%d, %q)", w.Code, w.Body.String())
+	}
+	previewURL, err := url.Parse(w.Header().Get("Location"))
+	if err != nil || !strings.HasSuffix(previewURL.Host, ".preview.sites.example.test") ||
+		previewURL.Query().Get("code") == "" {
+		t.Fatalf("preview grant URL = (%q, %v)", w.Header().Get("Location"), err)
+	}
+	accept := siteRequest(http.MethodGet, previewURL.String(), previewURL.Host)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, accept)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatalf("accept preview = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("preview handoff headers = %#v", w.Header())
+	}
+	previewCookies := w.Result().Cookies()
+	if len(previewCookies) != 2 {
+		t.Fatalf("preview cookies = %#v", previewCookies)
+	}
+	reusedGrant := siteRequest(http.MethodGet, previewURL.String(), previewURL.Host)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, reusedGrant)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("reused preview grant status = %d", w.Code)
+	}
+	previewOrigin := previewURL.Scheme + "://" + previewURL.Host
+	previewPage := siteRequest(http.MethodGet, previewOrigin+"/", previewURL.Host)
+	for _, previewCookie := range previewCookies {
+		previewPage.AddCookie(previewCookie)
+	}
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, previewPage)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Version one") ||
+		!strings.Contains(w.Body.String(), "Draft preview") || !strings.Contains(w.Body.String(), "Publish…") {
+		t.Fatalf("private draft preview = (%d, %q)", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Cache-Control") != "private, no-store" || w.Header().Get("Vary") != "Cookie" {
+		t.Fatalf("private draft cache headers = %#v", w.Header())
+	}
+	if w.Header().Get("Content-Security-Policy") != "frame-ancestors 'none'" ||
+		w.Header().Get("Cross-Origin-Resource-Policy") != "same-origin" ||
+		w.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("private draft embedding headers = %#v", w.Header())
+	}
+	previewETag := w.Header().Get("ETag")
+	previewHead := siteRequest(http.MethodHead, previewOrigin+"/", previewURL.Host)
+	for _, previewCookie := range previewCookies {
+		previewHead.AddCookie(previewCookie)
+	}
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, previewHead)
+	if w.Code != http.StatusOK || w.Body.Len() != 0 || w.Header().Get("ETag") != previewETag {
+		t.Fatalf("private draft HEAD = (%d, %q, %q)", w.Code, w.Header().Get("ETag"), w.Body.String())
+	}
+	publicWithPreviewCookie := siteRequest(http.MethodGet, "http://docs.sites.example.test/", "docs.sites.example.test")
+	for _, previewCookie := range previewCookies {
+		publicWithPreviewCookie.AddCookie(previewCookie)
+	}
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, publicWithPreviewCookie)
+	if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "Version one") {
+		t.Fatalf("preview cookie escaped to public origin = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	sites, err = server.database.Sites(context.Background(), session.User.ID, false)
+	if err != nil || len(sites[0].Releases) != 1 {
+		t.Fatalf("first release = (%#v, %v)", sites, err)
+	}
+	firstRelease := sites[0].Releases[0].ID
+	publish := request(http.MethodPost, "http://admin.example.test/sites/publish", url.Values{
+		"csrf_token": {session.CSRFToken}, "site_id": {sites[0].ID},
+		"site_name": {"docs"}, "release_id": {firstRelease},
+	})
+	publish.Header.Set("Origin", "http://admin.example.test")
+	publish.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, publish)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("publish first release = (%d, %q)", w.Code, w.Body.String())
+	}
+	public := siteRequest(http.MethodGet, "http://docs.sites.example.test/", "docs.sites.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, public)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Version one") || strings.Contains(w.Body.String(), "Draft preview") {
+		t.Fatalf("first public release = (%d, %q)", w.Code, w.Body.String())
+	}
+	etag := w.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("public release omitted ETag")
+	}
+	conditional := siteRequest(http.MethodGet, "http://docs.sites.example.test/", "docs.sites.example.test")
+	conditional.Header.Set("If-None-Match", etag)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, conditional)
+	if w.Code != http.StatusNotModified || w.Body.Len() != 0 {
+		t.Fatalf("conditional site response = (%d, %q)", w.Code, w.Body.String())
+	}
+	head := siteRequest(http.MethodHead, "http://docs.sites.example.test/", "docs.sites.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, head)
+	if w.Code != http.StatusOK || w.Body.Len() != 0 || w.Header().Get("Content-Length") == "" {
+		t.Fatalf("HEAD site response = (%d, %q, %q)", w.Code, w.Header().Get("Content-Length"), w.Body.String())
+	}
+	appRouteOnSite := siteRequest(http.MethodGet, "http://docs.sites.example.test/login", "docs.sites.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, appRouteOnSite)
+	if w.Code != http.StatusNotFound || strings.Contains(w.Body.String(), "Sign in") {
+		t.Fatalf("application route escaped to content host = (%d, %q)", w.Code, w.Body.String())
+	}
+	nonCanonical := siteRequest(http.MethodGet, "http://docs.sites.example.test/guide/../index.html", "docs.sites.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, nonCanonical)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("non-canonical hosted path status = %d", w.Code)
+	}
+
+	secondZIP := webZIP(t, map[string]string{"index.html": "<!doctype html><h1>Version two</h1>"})
+	upload = multipartSiteRequest(t, session.CSRFToken, sites[0].ID, "docs", secondZIP)
+	upload.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, upload)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("upload second draft = (%d, %q)", w.Code, w.Body.String())
+	}
+	public = siteRequest(http.MethodGet, "http://docs.sites.example.test/", "docs.sites.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, public)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Version one") || strings.Contains(w.Body.String(), "Version two") {
+		t.Fatalf("draft replaced public release = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	previewTokenCookie, previewViewCookie, secondPreviewURL := grantSitePreview(t, server, cookie, session.CSRFToken, "docs")
+	if secondPreviewURL.Host == previewURL.Host {
+		t.Fatalf("preview origin was reused: %q", secondPreviewURL.Host)
+	}
+	secondPreviewOrigin := secondPreviewURL.Scheme + "://" + secondPreviewURL.Host
+	draftTwo := siteRequest(http.MethodGet, secondPreviewOrigin+"/", secondPreviewURL.Host)
+	draftTwo.AddCookie(previewTokenCookie)
+	draftTwo.AddCookie(previewViewCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, draftTwo)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Version two") ||
+		!strings.Contains(w.Body.String(), ">Current</a>") || strings.Contains(w.Body.String(), "Version one") {
+		t.Fatalf("second private draft preview = (%d, %q)", w.Code, w.Body.String())
+	}
+	selectCurrent := siteRequest(
+		http.MethodGet,
+		secondPreviewOrigin+"/_wispdeck/preview/view/current?return=/",
+		secondPreviewURL.Host,
+	)
+	selectCurrent.AddCookie(previewTokenCookie)
+	selectCurrent.AddCookie(previewViewCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, selectCurrent)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatalf("select current preview = (%d, %q)", w.Code, w.Header().Get("Location"))
+	}
+	currentViewCookie := responseCookie(t, w.Result(), "wispdeck_preview_view")
+	currentPreview := siteRequest(http.MethodGet, secondPreviewOrigin+"/", secondPreviewURL.Host)
+	currentPreview.AddCookie(previewTokenCookie)
+	currentPreview.AddCookie(currentViewCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, currentPreview)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Version one") ||
+		!strings.Contains(w.Body.String(), "<strong>Current</strong>") || strings.Contains(w.Body.String(), "Version two") {
+		t.Fatalf("current release preview = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	sites, err = server.database.Sites(context.Background(), session.User.ID, false)
+	if err != nil || len(sites[0].Releases) != 2 {
+		t.Fatalf("second release = (%#v, %v)", sites, err)
+	}
+	secondRelease := sites[0].Releases[0].ID
+	publish = request(http.MethodPost, "http://admin.example.test/sites/publish", url.Values{
+		"csrf_token": {session.CSRFToken}, "site_id": {sites[0].ID},
+		"site_name": {"docs"}, "release_id": {secondRelease},
+	})
+	publish.Header.Set("Origin", "http://admin.example.test")
+	publish.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, publish)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("publish second release = (%d, %q)", w.Code, w.Body.String())
+	}
+	public = siteRequest(http.MethodGet, "http://docs.sites.example.test/", "docs.sites.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, public)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Version two") {
+		t.Fatalf("second public release = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	rollback := request(http.MethodPost, "http://admin.example.test/sites/publish", url.Values{
+		"csrf_token": {session.CSRFToken}, "site_id": {sites[0].ID},
+		"site_name": {"docs"}, "release_id": {firstRelease},
+	})
+	rollback.Header.Set("Origin", "http://admin.example.test")
+	rollback.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, rollback)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("roll back release = (%d, %q)", w.Code, w.Body.String())
+	}
+	public = siteRequest(http.MethodGet, "http://docs.sites.example.test/", "docs.sites.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, public)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Version one") || strings.Contains(w.Body.String(), "Version two") {
+		t.Fatalf("rolled-back public release = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	state := request(http.MethodPost, "http://admin.example.test/sites/state", url.Values{
+		"csrf_token": {session.CSRFToken}, "site_id": {sites[0].ID},
+		"site_name": {"docs"}, "enabled": {"false"},
+	})
+	state.Header.Set("Origin", "http://admin.example.test")
+	state.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, state)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("disable site = (%d, %q)", w.Code, w.Body.String())
+	}
+	for _, target := range []string{"http://docs.sites.example.test/", "http://admin.example.test/docs"} {
+		r := httptest.NewRequest(http.MethodGet, target, nil)
+		w = httptest.NewRecorder()
+		server.handler.ServeHTTP(w, r)
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("disabled site %s status = %d", target, w.Code)
+		}
+	}
+	state = request(http.MethodPost, "http://admin.example.test/sites/state", url.Values{
+		"csrf_token": {session.CSRFToken}, "site_id": {sites[0].ID},
+		"site_name": {"docs"}, "enabled": {"true"},
+	})
+	state.Header.Set("Origin", "http://admin.example.test")
+	state.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, state)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("re-enable site = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	unknownHost := siteRequest(http.MethodGet, "http://unconfigured.example.test/", "unconfigured.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, unknownHost)
+	if w.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("unknown host status = %d", w.Code)
+	}
+	invalidPreviewHost := siteRequest(
+		http.MethodGet, "http://docs.preview.sites.example.test/", "docs.preview.sites.example.test",
+	)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, invalidPreviewHost)
+	if w.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("invalid preview host status = %d", w.Code)
+	}
+}
+
+func TestDraftPreviewEntryContinuesThroughLogin(t *testing.T) {
+	server := newTestServer(t, false)
+	cookie, session := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+	created, err := server.sites.Create(context.Background(), site.Actor{UserID: session.User.ID}, "private", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleBytes := webZIP(t, map[string]string{"index.html": "draft"})
+	bundle, err := site.ReadZIP(bytes.NewReader(bundleBytes), int64(len(bundleBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.sites.Upload(context.Background(), site.Actor{UserID: session.User.ID}, created.ID, bundle); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := request(http.MethodGet, "http://admin.example.test/sites/private/preview-entry", nil)
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, entry)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/login" {
+		t.Fatalf("anonymous preview entry = (%d, %q)", w.Code, w.Header().Get("Location"))
+	}
+	returnCookie := responseCookie(t, w.Result(), "wispdeck_preview_return")
+
+	login := request(http.MethodPost, "http://admin.example.test/login", url.Values{
+		"username": {"alice"}, "password": {"correct horse battery staple"},
+	})
+	login.Header.Set("Origin", "http://admin.example.test")
+	login.AddCookie(returnCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, login)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/sites/private/preview-entry" {
+		t.Fatalf("preview login continuation = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+	_ = cookie
+}
+
+func siteRequest(method, target, host string) *http.Request {
+	r := httptest.NewRequest(method, target, nil)
+	r.Host = host
+	return r
+}
+
+func grantSitePreview(
+	t *testing.T,
+	server testServer,
+	sessionCookie *http.Cookie,
+	csrf, name string,
+) (*http.Cookie, *http.Cookie, *url.URL) {
+	t.Helper()
+	preview := request(http.MethodPost, "http://admin.example.test/sites/preview", url.Values{
+		"csrf_token": {csrf}, "site_name": {name},
+	})
+	preview.Header.Set("Origin", "http://admin.example.test")
+	preview.AddCookie(sessionCookie)
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, preview)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("create preview grant for %q = (%d, %q)", name, w.Code, w.Body.String())
+	}
+	previewURL, err := url.Parse(w.Header().Get("Location"))
+	if err != nil || previewURL.Query().Get("code") == "" {
+		t.Fatalf("preview grant URL for %q = (%q, %v)", name, w.Header().Get("Location"), err)
+	}
+	accept := siteRequest(http.MethodGet, previewURL.String(), previewURL.Host)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, accept)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatalf("accept preview for %q = (%d, %q)", name, w.Code, w.Body.String())
+	}
+	return responseCookie(t, w.Result(), "wispdeck_preview"),
+		responseCookie(t, w.Result(), "wispdeck_preview_view"), previewURL
+}
+
+func multipartSiteRequest(t *testing.T, csrf, siteID, siteName string, bundle []byte) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for name, value := range map[string]string{
+		"csrf_token": csrf, "site_id": siteID, "site_name": siteName,
+	} {
+		if err := writer.WriteField(name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file, err := writer.CreateFormFile("bundle", "site.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "http://admin.example.test/sites/upload", &body)
+	r.Host = "admin.example.test"
+	r.Header.Set("Content-Type", writer.FormDataContentType())
+	r.Header.Set("Origin", "http://admin.example.test")
+	return r
+}
+
+func webZIP(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for name, contents := range files {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(contents)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
 }
 
 func TestShortLinkFormsValidateOriginSlugAndTarget(t *testing.T) {

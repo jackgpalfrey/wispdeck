@@ -222,4 +222,11 @@ func TestMigrationSevenPreservesExistingShortLinks(t *testing.T) {
 	if len(links) != 1 || links[0].Mode != shortlink.ModeRedirect || links[0].VisitCount != 7 || len(links[0].Destinations) != 1 || links[0].Destinations[0].URL != "https://legacy.example" {
 		t.Fatalf("migrated short link = %#v", links)
 	}
+	var kind, resourceID string
+	if err := database.db.QueryRow(`SELECT kind, resource_id FROM public_names WHERE name = 'legacy'`).Scan(&kind, &resourceID); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "link" || resourceID != linkID {
+		t.Fatalf("migrated public name = (%q, %q)", kind, resourceID)
+	}
 }

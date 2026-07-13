@@ -23,6 +23,7 @@ import (
 	"github.com/wispdeck/wispdeck/internal/auth"
 	"github.com/wispdeck/wispdeck/internal/limit"
 	"github.com/wispdeck/wispdeck/internal/shortlink"
+	hostedsite "github.com/wispdeck/wispdeck/internal/site"
 )
 
 const productionCookieName = "__Host-wispdeck_session"
@@ -31,10 +32,15 @@ const (
 	productionLoginCookieName          = "__Host-wispdeck_login"
 	productionCeremonyCookieName       = "__Host-wispdeck_ceremony"
 	productionTOTPEnrollmentCookieName = "__Host-wispdeck_totp_enrollment"
+	productionPreviewCookieName        = "__Host-wispdeck_preview"
+	productionPreviewViewCookieName    = "__Host-wispdeck_preview_view"
+	productionPreviewReturnCookieName  = "__Host-wispdeck_preview_return"
 )
 
 type Config struct {
 	AppOrigin         *url.URL
+	SiteDomain        string
+	PreviewDomain     string
 	Development       bool
 	Logger            *slog.Logger
 	PasswordChecker   auth.PasswordChecker
@@ -47,6 +53,7 @@ type Server struct {
 	passkeys                 *auth.PasskeyService
 	totp                     *auth.TOTPService
 	links                    *shortlink.Service
+	sites                    *hostedsite.Service
 	passwordChecker          auth.PasswordChecker
 	limiter                  *limit.LoginLimiter
 	templates                *template.Template
@@ -55,6 +62,9 @@ type Server struct {
 	loginCookieName          string
 	ceremonyCookieName       string
 	totpEnrollmentCookieName string
+	previewCookieName        string
+	previewViewCookieName    string
+	previewReturnCookieName  string
 	trustedProxies           []*net.IPNet
 }
 
@@ -69,12 +79,21 @@ func New(
 	passkeyService *auth.PasskeyService,
 	totpService *auth.TOTPService,
 	shortLinkService *shortlink.Service,
+	siteService *hostedsite.Service,
 ) (*Server, error) {
+	if config.SiteDomain == "" && config.AppOrigin != nil {
+		config.SiteDomain = config.AppOrigin.Hostname()
+	}
+	config.SiteDomain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(config.SiteDomain), "."))
+	if config.PreviewDomain == "" && config.SiteDomain != "" {
+		config.PreviewDomain = "preview." + config.SiteDomain
+	}
+	config.PreviewDomain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(config.PreviewDomain), "."))
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
-	if authService == nil || passkeyService == nil || totpService == nil || shortLinkService == nil {
-		return nil, errors.New("authentication, passkey, TOTP, and short-link services are required")
+	if authService == nil || passkeyService == nil || totpService == nil || shortLinkService == nil || siteService == nil {
+		return nil, errors.New("authentication, passkey, TOTP, short-link, and site services are required")
 	}
 	if config.PasswordChecker == nil {
 		return nil, errors.New("password checker is required")
@@ -96,6 +115,7 @@ func New(
 		passkeys:                 passkeyService,
 		totp:                     totpService,
 		links:                    shortLinkService,
+		sites:                    siteService,
 		passwordChecker:          config.PasswordChecker,
 		limiter:                  limit.NewLoginLimiter(),
 		templates:                templates,
@@ -103,6 +123,9 @@ func New(
 		loginCookieName:          productionLoginCookieName,
 		ceremonyCookieName:       productionCeremonyCookieName,
 		totpEnrollmentCookieName: productionTOTPEnrollmentCookieName,
+		previewCookieName:        productionPreviewCookieName,
+		previewViewCookieName:    productionPreviewViewCookieName,
+		previewReturnCookieName:  productionPreviewReturnCookieName,
 		trustedProxies:           trustedProxies,
 	}
 	if config.Development {
@@ -110,6 +133,9 @@ func New(
 		s.loginCookieName = "wispdeck_login"
 		s.ceremonyCookieName = "wispdeck_ceremony"
 		s.totpEnrollmentCookieName = "wispdeck_totp_enrollment"
+		s.previewCookieName = "wispdeck_preview"
+		s.previewViewCookieName = "wispdeck_preview_view"
+		s.previewReturnCookieName = "wispdeck_preview_return"
 	}
 	s.handler = s.routes()
 	return s, nil
@@ -128,7 +154,30 @@ func validateConfig(config Config) error {
 	if u.Scheme != "https" && !(config.Development && u.Scheme == "http") {
 		return errors.New("application origin must use HTTPS outside development mode")
 	}
+	if !validSiteDomain(config.SiteDomain) {
+		return errors.New("site domain must be a valid DNS hostname without a scheme, wildcard, or port")
+	}
+	if !validSiteDomain(config.PreviewDomain) || config.PreviewDomain == config.SiteDomain {
+		return errors.New("preview domain must be a distinct valid DNS hostname without a scheme, wildcard, or port")
+	}
 	return nil
+}
+
+func validSiteDomain(value string) bool {
+	if value == "" || len(value) > 253 || net.ParseIP(value) != nil {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, char := range []byte(label) {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *Server) routes() http.Handler {
@@ -149,6 +198,12 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /links/update", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.updateShortLink))))
 	mux.Handle("POST /links/state", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.setShortLinkState))))
 	mux.Handle("POST /links/retire", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.retireShortLink))))
+	mux.Handle("POST /sites/create", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.createSite))))
+	mux.Handle("POST /sites/upload", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.uploadSite))))
+	mux.Handle("POST /sites/publish", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.publishSite))))
+	mux.Handle("POST /sites/state", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.setSiteState))))
+	mux.Handle("POST /sites/preview", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.previewSite))))
+	mux.HandleFunc("GET /sites/{name}/preview-entry", s.previewSiteEntry)
 	mux.Handle("GET /security/passkeys", s.requireSession(http.HandlerFunc(s.passkeySettings)))
 	mux.Handle("POST /security/mfa/skip", s.requireSession(http.HandlerFunc(s.skipMFA)))
 	mux.Handle("POST /api/auth/passkey/register/begin", s.requireSession(http.HandlerFunc(s.beginPasskeyRegistration)))
@@ -169,8 +224,9 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /settings/users/role", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.changeUserRole))))
 	mux.Handle("POST /settings/users/status", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.changeUserStatus))))
 	mux.Handle("POST /settings/users/setup-link", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.replaceUserSetupLink))))
-	mux.HandleFunc("GET /{slug}", s.resolveShortLink)
-	return s.securityBoundary(mux)
+	mux.HandleFunc("GET /{slug}", s.resolvePublicName)
+	mux.HandleFunc("GET /{slug}/{rest...}", s.redirectSiteAlias)
+	return s.hostBoundary(s.securityBoundary(mux))
 }
 
 func (s *Server) assets() http.Handler {
@@ -209,7 +265,7 @@ func equalHost(a, b string) bool {
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	if session, ok := s.sessionFromRequest(r); ok {
 		if _, err := s.auth.Authenticate(r.Context(), session); err == nil {
-			http.Redirect(w, r, "/", http.StatusSeeOther)
+			http.Redirect(w, r, s.afterLoginPath(w, r, "/"), http.StatusSeeOther)
 			return
 		}
 	}
@@ -269,7 +325,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setSessionCookie(w, token)
 	if session.Assurance == auth.AssurancePassword {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, s.afterLoginPath(w, r, "/"), http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
@@ -339,9 +395,12 @@ type dashboardView struct {
 	Role         auth.Role
 	ShowOwners   bool
 	ShortBaseURL string
+	SiteDomain   string
 	CreatedURL   string
+	CreatedSite  string
 	Create       shortLinkForm
 	Links        []shortLinkView
+	Sites        []siteView
 	Audit        []auditEventView
 }
 
@@ -357,6 +416,12 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 	auditEvents, err := s.links.AuditEvents(r.Context(), actor, 25)
 	if err != nil {
 		s.config.Logger.ErrorContext(r.Context(), "list short-link audit events", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	hostedSites, err := s.sites.List(r.Context(), siteActor(session))
+	if err != nil {
+		s.config.Logger.ErrorContext(r.Context(), "list hosted sites", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -413,13 +478,28 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 			}
 		}
 	}
+	selectedSite := ""
+	if normalized, normalizeErr := hostedsite.NormalizeName(r.URL.Query().Get("site")); normalizeErr == nil {
+		selectedSite = normalized
+	}
+	createdSite := ""
+	if normalized, normalizeErr := hostedsite.NormalizeName(r.URL.Query().Get("site_created")); normalizeErr == nil {
+		for _, value := range hostedSites {
+			if value.Name == normalized && value.OwnerUserID == session.User.ID {
+				createdSite = normalized
+				selectedSite = normalized
+				break
+			}
+		}
+	}
 	form = withShortLinkFormDefaults(form)
 	s.render(w, status, "dashboard.html", dashboardView{
 		Username: session.User.Username, CSRFToken: session.CSRFToken,
 		Assurance: session.Assurance, Role: session.User.Role,
 		ShowOwners:   session.User.Role == auth.RoleSuperuser,
-		ShortBaseURL: s.shortLinkURL(""), CreatedURL: createdURL,
-		Create: form, Links: views, Audit: audit,
+		ShortBaseURL: s.shortLinkURL(""), SiteDomain: s.config.SiteDomain,
+		CreatedURL: createdURL, CreatedSite: createdSite,
+		Create: form, Links: views, Sites: siteViews(hostedSites, s, selectedSite), Audit: audit,
 	})
 }
 
@@ -976,7 +1056,7 @@ func (s *Server) skipMFA(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, s.afterLoginPath(w, r, "/"), http.StatusSeeOther)
 }
 
 func (s *Server) passkeyLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -1051,7 +1131,7 @@ func (s *Server) finishPasskeyLogin(w http.ResponseWriter, r *http.Request) {
 	s.setSessionCookie(w, token)
 	s.clearOpaqueCookie(w, s.loginCookieName)
 	s.clearOpaqueCookie(w, s.ceremonyCookieName)
-	writeJSON(w, http.StatusOK, map[string]string{"redirect": "/"})
+	writeJSON(w, http.StatusOK, map[string]string{"redirect": s.afterLoginPath(w, r, "/")})
 }
 
 func (s *Server) recoveryLogin(w http.ResponseWriter, r *http.Request) {
@@ -1084,6 +1164,7 @@ func (s *Server) recoveryLogin(w http.ResponseWriter, r *http.Request) {
 	s.setSessionCookie(w, token)
 	s.clearOpaqueCookie(w, s.loginCookieName)
 	s.clearOpaqueCookie(w, s.ceremonyCookieName)
+	s.clearPreviewReturnCookie(w)
 	http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
 }
 
@@ -1122,7 +1203,7 @@ func (s *Server) totpLogin(w http.ResponseWriter, r *http.Request) {
 	s.setSessionCookie(w, token)
 	s.clearOpaqueCookie(w, s.loginCookieName)
 	s.clearOpaqueCookie(w, s.ceremonyCookieName)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, s.afterLoginPath(w, r, "/"), http.StatusSeeOther)
 }
 
 func (s *Server) passkeySettings(w http.ResponseWriter, r *http.Request) {

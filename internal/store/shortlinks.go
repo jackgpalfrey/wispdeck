@@ -27,21 +27,51 @@ func (s *SQLite) CreateShortLink(
 	}
 	defer func() { _ = tx.Rollback() }()
 	result, err := tx.ExecContext(ctx, `
+		INSERT INTO public_names (
+			name, owner_user_id, kind, resource_id, created_at
+		)
+		SELECT ?, u.id, 'link', ?, ?
+		FROM users AS u
+		WHERE u.id = ? AND u.status = ?
+		ON CONFLICT(name) DO NOTHING`,
+		value.Slug, id, unix(now), ownerUserID, auth.UserActive,
+	)
+	if err != nil {
+		return shortlink.Link{}, fmt.Errorf("reserve short-link name: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return shortlink.Link{}, fmt.Errorf("inspect short-link name reservation: %w", err)
+	}
+	if rows != 1 {
+		var active bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM users WHERE id = ? AND status = ?)`,
+			ownerUserID, auth.UserActive,
+		).Scan(&active); err != nil {
+			return shortlink.Link{}, fmt.Errorf("check short-link owner: %w", err)
+		}
+		if !active {
+			return shortlink.Link{}, shortlink.ErrForbidden
+		}
+		return shortlink.Link{}, shortlink.ErrSlugUnavailable
+	}
+
+	result, err = tx.ExecContext(ctx, `
 		INSERT INTO short_links (
 			id, owner_user_id, slug, title, description, mode, enabled,
 			created_at, updated_at, expires_at
 		)
 		SELECT ?, u.id, ?, ?, ?, ?, 1, ?, ?, ?
 		FROM users AS u
-		WHERE u.id = ? AND u.status = ?
-		ON CONFLICT(slug) DO NOTHING`,
+		WHERE u.id = ? AND u.status = ?`,
 		id, value.Slug, value.Title, value.Description, value.Mode,
 		unix(now), unix(now), nullableUnix(value.ExpiresAt), ownerUserID, auth.UserActive,
 	)
 	if err != nil {
 		return shortlink.Link{}, fmt.Errorf("insert short link: %w", err)
 	}
-	rows, err := result.RowsAffected()
+	rows, err = result.RowsAffected()
 	if err != nil {
 		return shortlink.Link{}, fmt.Errorf("inspect short-link insert: %w", err)
 	}
@@ -56,7 +86,7 @@ func (s *SQLite) CreateShortLink(
 		if !active {
 			return shortlink.Link{}, shortlink.ErrForbidden
 		}
-		return shortlink.Link{}, shortlink.ErrSlugUnavailable
+		return shortlink.Link{}, errors.New("reserved short-link name could not be inserted")
 	}
 	destinations, err := insertDestinations(ctx, tx, id, value.Destinations)
 	if err != nil {
@@ -248,6 +278,17 @@ func (s *SQLite) RetireShortLink(
 		return fmt.Errorf("retire short link: %w", err)
 	}
 	if err := recordCrossOwnerAudit(ctx, tx, actorUserID, ownerUserID, id, slug, shortlink.AuditRetired, includeAll, now); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE public_names SET retired_at = ?
+		WHERE kind = 'link' AND resource_id = ? AND retired_at IS NULL`,
+		unix(now), id,
+	)
+	if err != nil {
+		return fmt.Errorf("retire short-link public name: %w", err)
+	}
+	if err := requireOneRow(result, "short-link public name"); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

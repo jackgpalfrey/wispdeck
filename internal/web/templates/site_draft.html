@@ -1,0 +1,27 @@
+{{define "site_draft.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Draft site — Wispdeck</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+    body { display:grid; min-height:100vh; margin:0; padding:1.5rem; box-sizing:border-box; place-items:center; background:#101116; color:#f4f5f8; }
+    main { width:min(28rem,100%); padding:2rem; box-sizing:border-box; border:1px solid #30323d; border-radius:1rem; background:#191a21; box-shadow:0 20px 60px #0006; }
+    .mark { display:grid; width:2.3rem; height:2.3rem; place-items:center; border-radius:.7rem; background:#8f80f6; color:#11121a; font-weight:850; }
+    h1 { margin:1.3rem 0 .6rem; font-size:1.7rem; letter-spacing:-.03em; }
+    p { color:#a7aab8; }
+    a { display:flex; justify-content:center; margin-top:1.4rem; padding:.8rem 1rem; border-radius:.6rem; background:#8f80f6; color:#11121a; font-weight:750; text-decoration:none; }
+    small { display:block; margin-top:1rem; color:#7f8290; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark" aria-hidden="true">W</div>
+    <h1>This site is currently a draft</h1>
+    <p><strong>{{.Name}}</strong> has not been published yet. Its owner can sign in to preview the draft.</p>
+    <a href="{{.LoginURL}}">Sign in to preview</a>
+    <small>Other visitors cannot access draft files.</small>
+  </main>
+</body>
+</html>{{end}}

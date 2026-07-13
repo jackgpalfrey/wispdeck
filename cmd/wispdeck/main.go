@@ -19,6 +19,7 @@ import (
 
 	"github.com/wispdeck/wispdeck/internal/auth"
 	"github.com/wispdeck/wispdeck/internal/shortlink"
+	"github.com/wispdeck/wispdeck/internal/site"
 	"github.com/wispdeck/wispdeck/internal/store"
 	"github.com/wispdeck/wispdeck/internal/web"
 	"golang.org/x/term"
@@ -84,6 +85,8 @@ func serve(args []string, logger *slog.Logger) error {
 	authKey := flags.String("auth-key", "data/auth.key", "installation authentication key path")
 	listen := flags.String("listen", "127.0.0.1:8080", "HTTP listen address")
 	appOrigin := flags.String("app-origin", "", "public application origin (required)")
+	siteDomain := flags.String("site-domain", "", "hosted-site domain suffix (defaults to the application hostname)")
+	previewDomain := flags.String("preview-domain", "", "isolated preview domain suffix (defaults to preview.<site-domain>)")
 	development := flags.Bool("development", false, "allow HTTP and insecure cookies for local development")
 	offlinePasswordCheck := flags.Bool("offline-password-check", false, "use only the built-in password blocklist")
 	var trustedProxies stringListFlag
@@ -134,6 +137,10 @@ func serve(args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	siteService, err := site.NewService(databaseStore)
+	if err != nil {
+		return err
+	}
 	stopVisitFlusher := startVisitFlusher(shortLinkService, logger)
 	defer stopVisitFlusher()
 	passwordChecker := auth.PasswordChecker(auth.NewStaticPasswordChecker())
@@ -142,11 +149,13 @@ func serve(args []string, logger *slog.Logger) error {
 	}
 	webServer, err := web.New(web.Config{
 		AppOrigin:         origin,
+		SiteDomain:        *siteDomain,
+		PreviewDomain:     *previewDomain,
 		Development:       *development,
 		Logger:            logger,
 		PasswordChecker:   passwordChecker,
 		TrustedProxyCIDRs: trustedProxies,
-	}, authService, passkeyService, totpService, shortLinkService)
+	}, authService, passkeyService, totpService, shortLinkService, siteService)
 	if err != nil {
 		return err
 	}

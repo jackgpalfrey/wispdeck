@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 7
+const schemaVersion = 9
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
@@ -59,6 +59,14 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err := migrationSeven(ctx, tx); err != nil {
 				return err
 			}
+		case 8:
+			if err := migrationEight(ctx, tx); err != nil {
+				return err
+			}
+		case 9:
+			if err := migrationNine(ctx, tx); err != nil {
+				return err
+			}
 		}
 		version++
 		if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
@@ -70,6 +78,153 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrationNine(ctx context.Context, tx *sql.Tx) error {
+	// Preview authorization moved off the public content origin. Preview grants
+	// and sessions are intentionally ephemeral, so an upgrade invalidates them
+	// instead of attempting to preserve credentials across the boundary change.
+	const schema = `
+		DROP TABLE site_preview_sessions;
+		DROP TABLE site_preview_grants;
+
+		CREATE TABLE site_preview_grants (
+			token_hash BLOB PRIMARY KEY CHECK(length(token_hash) = 32),
+			origin_label TEXT NOT NULL UNIQUE
+				CHECK(length(origin_label) = 33)
+				CHECK(origin_label = lower(origin_label))
+				CHECK(substr(origin_label, 1, 1) = 'p')
+				CHECK(substr(origin_label, 2) NOT GLOB '*[^0-9a-f]*'),
+			site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			CHECK(created_at < expires_at)
+		) STRICT;
+		CREATE INDEX site_preview_grants_expires ON site_preview_grants(expires_at);
+
+		CREATE TABLE site_preview_sessions (
+			token_hash BLOB PRIMARY KEY CHECK(length(token_hash) = 32),
+			origin_label TEXT NOT NULL UNIQUE
+				CHECK(length(origin_label) = 33)
+				CHECK(origin_label = lower(origin_label))
+				CHECK(substr(origin_label, 1, 1) = 'p')
+				CHECK(substr(origin_label, 2) NOT GLOB '*[^0-9a-f]*'),
+			site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			CHECK(created_at < expires_at)
+		) STRICT;
+		CREATE INDEX site_preview_sessions_expires ON site_preview_sessions(expires_at);
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 9: %w", err)
+	}
+	return nil
+}
+
+func migrationEight(ctx context.Context, tx *sql.Tx) error {
+	const schema = `
+		CREATE TABLE public_names (
+			name TEXT PRIMARY KEY COLLATE NOCASE
+				CHECK(length(name) BETWEEN 1 AND 48)
+				CHECK(name = lower(name))
+				CHECK(name NOT GLOB '*[^a-z0-9-]*')
+				CHECK(substr(name, 1, 1) <> '-' AND substr(name, -1, 1) <> '-'),
+			owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			kind TEXT NOT NULL CHECK(kind IN ('link', 'site')),
+			resource_id TEXT NOT NULL CHECK(length(resource_id) = 32),
+			created_at INTEGER NOT NULL,
+			retired_at INTEGER,
+			UNIQUE(kind, resource_id),
+			CHECK(retired_at IS NULL OR created_at <= retired_at)
+		) STRICT;
+		INSERT INTO public_names (
+			name, owner_user_id, kind, resource_id, created_at, retired_at
+		)
+		SELECT slug, owner_user_id, 'link', id, created_at, deleted_at
+		FROM short_links;
+
+		CREATE TABLE sites (
+			id TEXT PRIMARY KEY CHECK(length(id) = 32),
+			owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			name TEXT NOT NULL COLLATE NOCASE UNIQUE
+				CHECK(length(name) BETWEEN 1 AND 48)
+				CHECK(name = lower(name))
+				CHECK(name NOT GLOB '*[^a-z0-9-]*')
+				CHECK(substr(name, 1, 1) <> '-' AND substr(name, -1, 1) <> '-'),
+			title TEXT NOT NULL DEFAULT '' CHECK(length(title) <= 120),
+			enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			draft_release_id TEXT REFERENCES site_releases(id) ON DELETE RESTRICT,
+			published_release_id TEXT REFERENCES site_releases(id) ON DELETE RESTRICT,
+			CHECK(created_at <= updated_at),
+			CHECK(draft_release_id IS NULL OR draft_release_id <> published_release_id)
+		) STRICT;
+		CREATE INDEX sites_owner_created ON sites(owner_user_id, created_at DESC, id);
+
+		CREATE TABLE site_releases (
+			id TEXT PRIMARY KEY CHECK(length(id) = 32),
+			site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+			version INTEGER NOT NULL CHECK(version > 0),
+			created_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			file_count INTEGER NOT NULL CHECK(file_count BETWEEN 1 AND 500),
+			total_bytes INTEGER NOT NULL CHECK(total_bytes BETWEEN 0 AND 52428800),
+			bundle_digest BLOB NOT NULL CHECK(length(bundle_digest) = 32),
+			created_at INTEGER NOT NULL,
+			published_at INTEGER,
+			UNIQUE(site_id, version),
+			CHECK(published_at IS NULL OR created_at <= published_at)
+		) STRICT;
+		CREATE INDEX site_releases_site_version ON site_releases(site_id, version DESC);
+
+		CREATE TABLE site_files (
+			release_id TEXT NOT NULL REFERENCES site_releases(id) ON DELETE RESTRICT,
+			path TEXT NOT NULL CHECK(length(path) BETWEEN 1 AND 4096),
+			content_type TEXT NOT NULL CHECK(length(content_type) BETWEEN 1 AND 255),
+			body BLOB NOT NULL CHECK(length(body) <= 10485760),
+			digest BLOB NOT NULL CHECK(length(digest) = 32),
+			PRIMARY KEY(release_id, path)
+		) WITHOUT ROWID, STRICT;
+
+		CREATE TABLE site_preview_grants (
+			token_hash BLOB PRIMARY KEY CHECK(length(token_hash) = 32),
+			site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			CHECK(created_at < expires_at)
+		) STRICT;
+		CREATE INDEX site_preview_grants_expires ON site_preview_grants(expires_at);
+
+		CREATE TABLE site_preview_sessions (
+			token_hash BLOB PRIMARY KEY CHECK(length(token_hash) = 32),
+			site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			CHECK(created_at < expires_at)
+		) STRICT;
+		CREATE INDEX site_preview_sessions_expires ON site_preview_sessions(expires_at);
+
+		CREATE TABLE site_audit_events (
+			id INTEGER PRIMARY KEY,
+			occurred_at INTEGER NOT NULL,
+			actor_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+			name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 48),
+			kind TEXT NOT NULL CHECK(kind IN ('uploaded', 'published', 'enabled', 'disabled'))
+		) STRICT;
+		CREATE INDEX site_audit_owner_time
+			ON site_audit_events(owner_user_id, occurred_at DESC, id DESC);
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 8: %w", err)
 	}
 	return nil
 }

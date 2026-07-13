@@ -37,7 +37,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Short links — Wispdeck</title>
+  <title>Dashboard — Wispdeck</title>
   <link rel="stylesheet" href="/assets/admin.css">
   <script src="/assets/links.js" defer></script>
 </head>
@@ -49,6 +49,7 @@
         <span>Wispdeck</span>
       </a>
       <nav aria-label="Account navigation">
+        <a href="#sites">Sites</a>
         {{if eq .Role "superuser"}}<a href="/settings/users">Users</a>{{end}}
         <a href="/security/passkeys">Account</a>
         <span class="user-chip">{{.Username}}</span>
@@ -61,6 +62,16 @@
           <span>MFA is not enabled. This account uses password-only sign-in.</span>
           <a href="/security/passkeys">Review security</a>
         </div>
+      {{end}}
+
+      {{if .CreatedSite}}
+      <div class="success-banner" role="status">
+        <div>
+          <strong>{{.CreatedSite}}.{{.SiteDomain}} is reserved for you</strong>
+          <span class="subtle">Upload a ZIP bundle to create its first private draft.</span>
+        </div>
+        <a class="button ghost compact" href="#sites">Set up site</a>
+      </div>
       {{end}}
 
       {{if .CreatedURL}}
@@ -308,6 +319,153 @@
             <strong>No short links yet</strong>
             <p>Paste your first destination above. You can be sharing it in a few seconds.</p>
           </div>
+        {{end}}
+      </section>
+
+      <section class="sites-section" id="sites" aria-labelledby="sites-heading">
+        <div class="section-heading sites-heading">
+          <div>
+            <span class="eyebrow">Hosting</span>
+            <h2 id="sites-heading">Hosted sites</h2>
+            <p>Static sites with private drafts, atomic publishing and no idle runtime.</p>
+          </div>
+          <span class="site-count">{{len .Sites}} site{{if ne (len .Sites) 1}}s{{end}}</span>
+        </div>
+
+        <details class="create-site-panel progressive-panel"{{if not .Sites}} open{{end}}>
+          <summary>
+            <span><strong>Create a site</strong><small>Reserve a permanent public name</small></span>
+            <span class="summary-action"><span class="when-closed">Create</span><span class="when-open">Close</span></span>
+          </summary>
+          <form action="/sites/create" method="post" class="site-create-form">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <label>
+              <span class="field-label">Site address</span>
+              <span class="site-name-input"><input name="name" autocomplete="off" maxlength="48" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?" placeholder="my-site" required><span>.{{.SiteDomain}}</span></span>
+              <span class="helper">This name is shared with short links and remains reserved to your account.</span>
+            </label>
+            <label>
+              <span class="field-label">Private title <span class="optional">Optional</span></span>
+              <input name="title" autocomplete="off" maxlength="120" placeholder="My useful little site">
+            </label>
+            <button type="submit" class="button primary compact">Create site</button>
+          </form>
+        </details>
+
+        {{if .Sites}}
+        <ul class="site-list">
+          {{range .Sites}}
+          <li class="site-card">
+            <div class="site-card-header">
+              <div>
+                <div class="link-title-row">
+                  <h3>{{if .Title}}{{.Title}}{{else}}{{.Name}}{{end}}</h3>
+                  <div class="record-badges">
+                    {{if not .Enabled}}<span class="status disabled"><span class="status-dot"></span>Disabled</span>{{else if .HasPublished}}<span class="status enabled"><span class="status-dot"></span>Live</span>{{else if .HasDraft}}<span class="status mode"><span class="status-dot"></span>Draft</span>{{else}}<span class="status disabled"><span class="status-dot"></span>Empty</span>{{end}}
+                    {{if .HasDraft}}<span class="status mode">Unpublished changes</span>{{end}}
+                  </div>
+                </div>
+                {{if .Title}}<span class="slug-label">{{.Name}}</span>{{end}}
+              </div>
+              <div class="link-actions">
+                {{if .HasDraft}}
+                <form action="/sites/preview" method="post">
+                  <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                  <input type="hidden" name="site_name" value="{{.Name}}">
+                  <button type="submit" class="button secondary compact">Preview draft</button>
+                </form>
+                {{end}}
+                {{if .HasPublished}}<a class="button ghost compact" href="{{.URL}}" target="_blank" rel="noreferrer">Visit</a>{{end}}
+              </div>
+            </div>
+            <a class="public-url" href="{{.URL}}" target="_blank" rel="noreferrer">{{.URL}}</a>
+            {{if $.ShowOwners}}<p class="helper site-owner">Owner <strong>{{.OwnerUsername}}</strong></p>{{end}}
+
+            <details class="manage-panel"{{if .Selected}} open{{end}}>
+              <summary><span>Deploy and manage</span><span class="summary-action"><span class="when-closed">Open</span><span class="when-open">Close</span></span></summary>
+              <div class="manage-content">
+                <div class="upload-panel">
+                  <div>
+                    <strong>Upload a new draft</strong>
+                    <p>ZIP an already-built site with <code>index.html</code> at its root. Uploading never changes the live version.</p>
+                  </div>
+                  <form action="/sites/upload" method="post" enctype="multipart/form-data" class="site-upload-form">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                    <input type="hidden" name="site_id" value="{{.ID}}">
+                    <input type="hidden" name="site_name" value="{{.Name}}">
+                    <label>
+                      <span class="sr-only">ZIP bundle</span>
+                      <input name="bundle" type="file" accept=".zip,application/zip" required>
+                    </label>
+                    <button type="submit" class="button secondary compact">Upload draft</button>
+                  </form>
+                  <p class="helper">Maximum 20 MiB upload, 50 MiB expanded, 500 files and 10 MiB per file.</p>
+                </div>
+
+                {{if .Releases}}
+                {{$siteID := .ID}}{{$siteName := .Name}}
+                <div class="release-list" aria-label="Site releases">
+                  <div class="release-list-heading"><strong>Release history</strong><span>Newest first</span></div>
+                  {{range .Releases}}
+                  <div class="release-row">
+                    <div>
+                      <div class="release-title">Version {{.Version}}
+                        {{if .Draft}}<span class="status mode">Draft</span>{{end}}
+                        {{if .Current}}<span class="status enabled">Current</span>{{end}}
+                      </div>
+                      <span class="helper">{{.FileCount}} file{{if ne .FileCount 1}}s{{end}} · {{.TotalSize}} · uploaded {{.CreatedAt}}{{if ne .PublishedAt "Never"}} · first published {{.PublishedAt}}{{end}}</span>
+                    </div>
+                    {{if .Draft}}
+                    <form action="/sites/publish" method="post">
+                      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                      <input type="hidden" name="site_id" value="{{$siteID}}">
+                      <input type="hidden" name="site_name" value="{{$siteName}}">
+                      <input type="hidden" name="release_id" value="{{.ID}}">
+                      <button type="submit" class="button primary compact">Publish publicly</button>
+                    </form>
+                    {{else if not .Current}}
+                    <form action="/sites/publish" method="post">
+                      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                      <input type="hidden" name="site_id" value="{{$siteID}}">
+                      <input type="hidden" name="site_name" value="{{$siteName}}">
+                      <input type="hidden" name="release_id" value="{{.ID}}">
+                      <button type="submit" class="button ghost compact">Roll back to this</button>
+                    </form>
+                    {{end}}
+                  </div>
+                  {{end}}
+                </div>
+                {{end}}
+
+                <div class="link-settings-row">
+                  <div>
+                    <strong>{{if .Enabled}}Take this site offline{{else}}Bring this site online{{end}}</strong>
+                    <p>The name remains reserved to its original owner either way.</p>
+                  </div>
+                  <form action="/sites/state" method="post">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                    <input type="hidden" name="site_id" value="{{.ID}}">
+                    <input type="hidden" name="site_name" value="{{.Name}}">
+                    {{if .Enabled}}
+                    <input type="hidden" name="enabled" value="false">
+                    <button type="submit" class="button secondary compact">Disable site</button>
+                    {{else}}
+                    <input type="hidden" name="enabled" value="true">
+                    <button type="submit" class="button secondary compact">Enable site</button>
+                    {{end}}
+                  </form>
+                </div>
+              </div>
+            </details>
+          </li>
+          {{end}}
+        </ul>
+        {{else}}
+        <div class="empty-state site-empty-state">
+          <div class="empty-mark" aria-hidden="true">◇</div>
+          <strong>No hosted sites yet</strong>
+          <p>Reserve a name above, then upload a static ZIP bundle as its first private draft.</p>
+        </div>
         {{end}}
       </section>
 
