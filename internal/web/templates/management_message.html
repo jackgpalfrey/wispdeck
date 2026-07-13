@@ -1,0 +1,16 @@
+{{define "management_message.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} — Wispdeck</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+</head>
+<body>
+  <main class="panel">
+    <h1>{{.Title}}</h1>
+    <p>{{.Message}}</p>
+    <p><a href="/settings/users">Return to users</a></p>
+  </main>
+</body>
+</html>{{end}}

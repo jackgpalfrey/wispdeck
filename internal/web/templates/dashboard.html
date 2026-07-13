@@ -14,6 +14,8 @@
       <p class="notice">MFA is not enabled. This account is protected only by its password. <a href="/security/passkeys">Set up MFA</a>.</p>
     {{end}}
     <p class="subtle">Links, sites, and data will live here.</p>
+    <p><a href="/security/passkeys">Account and security</a></p>
+    {{if eq .Role "superuser"}}<p><a href="/settings/users">Manage users</a></p>{{end}}
     <form action="/logout" method="post">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
       <button type="submit" class="secondary">Sign out</button>

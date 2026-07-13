@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
@@ -47,6 +47,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err := migrationFour(ctx, tx); err != nil {
 				return err
 			}
+		case 5:
+			if err := migrationFive(ctx, tx); err != nil {
+				return err
+			}
 		}
 		version++
 		if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
@@ -58,6 +62,31 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrationFive(ctx context.Context, tx *sql.Tx) error {
+	// Existing local users retain their previous full authority as superusers. Accounts
+	// created through the web interface select their role explicitly.
+	const schema = `
+		ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'superuser'
+			CHECK(role IN ('user', 'superuser'));
+		ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'
+			CHECK(status IN ('pending', 'active', 'disabled'));
+
+		CREATE TABLE user_setup_tokens (
+			token_hash BLOB PRIMARY KEY CHECK(length(token_hash) = 32),
+			user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+			created_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			CHECK(created_at < expires_at)
+		) STRICT;
+		CREATE INDEX user_setup_tokens_expires ON user_setup_tokens(expires_at);
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 5: %w", err)
 	}
 	return nil
 }

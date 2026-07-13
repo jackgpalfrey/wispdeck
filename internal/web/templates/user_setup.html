@@ -1,0 +1,24 @@
+{{define "user_setup.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set up {{.Username}} — Wispdeck</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+</head>
+<body>
+  <main class="panel">
+    <h1>Set up your account</h1>
+    <p>Choose the permanent password for <strong>{{.Username}}</strong>.</p>
+    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+    <form action="/setup" method="post">
+      <input type="hidden" name="token" value="{{.Token}}">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" minlength="15" maxlength="1024" required autofocus>
+      <label for="confirm-password">Confirm password</label>
+      <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" minlength="15" maxlength="1024" required>
+      <button type="submit">Set password</button>
+    </form>
+  </main>
+</body>
+</html>{{end}}

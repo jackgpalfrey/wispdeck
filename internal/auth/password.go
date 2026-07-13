@@ -23,6 +23,7 @@ const (
 
 var (
 	ErrInvalidHash      = errors.New("invalid password hash")
+	ErrPasswordInvalid  = errors.New("password must be valid UTF-8")
 	ErrPasswordTooShort = fmt.Errorf("password must contain at least %d characters", MinPasswordRunes)
 	ErrPasswordTooLong  = fmt.Errorf("password must contain at most %d characters", MaxPasswordRunes)
 )
@@ -49,7 +50,7 @@ var defaultPasswordParams = PasswordParams{
 // does not trim, normalize, or impose character-composition rules.
 func ValidatePassword(password string) error {
 	if !utf8.ValidString(password) {
-		return errors.New("password must be valid UTF-8")
+		return ErrPasswordInvalid
 	}
 	password = normalizePassword(password)
 	if len(password) > maxPasswordBytes {

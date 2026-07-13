@@ -27,7 +27,7 @@ func TestCreateAdminFromExplicitStdin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `Created administrator "alice"`) {
+	if !strings.Contains(output.String(), `Created superuser "alice"`) {
 		t.Fatalf("output = %q", output.String())
 	}
 }

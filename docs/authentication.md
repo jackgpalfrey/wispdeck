@@ -1,6 +1,6 @@
 # Production authentication design
 
-Status: implementation contract, 2026-07-11.
+Status: implementation contract, 2026-07-13.
 
 This document refines the trust model in `security-model.md` into concrete
 authentication and recovery flows. Wispdeck does not claim production-ready
@@ -9,22 +9,21 @@ tested.
 
 ## Factors and assurance
 
-An administrative session has one of four assurance states:
+An application session has one of four assurance states:
 
 - `bootstrap`: password verified, but the account has no second factor yet.
   This session may enroll the first passkey or TOTP authenticator, explicitly
   opt into password-only access, or sign out.
 - `password`: password verified and the operator explicitly chose not to use
-  MFA. Normal administration is available, but the interface continuously
-  warns that the account has only one factor. Sensitive authentication changes
-  still require MFA.
+  MFA. Normal application and role-authorized management are available, but
+  the interface continuously warns that the account has only one factor.
 - `mfa`: password and either a user-verifying WebAuthn credential or TOTP code
   were verified.
 - `recovery`: password and a one-use recovery code were verified. This session
   may only enroll a replacement factor, inspect security events, or sign out.
 
 Once an account has any second factor, a password alone never creates an
-administrative session. The first factor is enrolled through a recent
+application session. The first factor is enrolled through a recent
 `bootstrap` or `password` session. All later factor changes require a recently
 created `mfa` session. Sensitive operations require authentication within the
 last ten minutes; otherwise the operator signs in again.
@@ -36,7 +35,7 @@ preference and makes MFA mandatory on subsequent logins.
 
 ## WebAuthn boundary
 
-The relying-party ID is the exact admin hostname. It is never a parent domain
+The relying-party ID is the exact application hostname. It is never a parent domain
 that may also contain hosted user content. Cross-origin ceremonies are disabled
 and user verification is required.
 
@@ -81,8 +80,25 @@ Only the range prefix is transmitted. Failure to perform the online check is a
 hard failure unless the local CLI operator explicitly selects the documented
 offline override. Login never calls an external service.
 
-Changing a password requires a recent `mfa` session and the current password.
-It revokes every session and pending ceremony, forcing a clean login.
+Changing a password requires the current password but does not require MFA.
+Recovery sessions remain restricted from password changes. A successful change
+revokes every session and pending ceremony, forcing a clean login.
+
+## Users and roles
+
+Wispdeck has `user` and `superuser` roles. Roles and active status are loaded
+from the user record on every authenticated request, so demotion or disabling
+takes effect immediately. Disabling a user revokes that user's sessions and
+pending login state. The database refuses to demote or disable the final active
+superuser.
+
+Superusers can create an account with either a permanent password or a one-use
+setup link. Setup tokens contain 256 random bits, are stored only as SHA-256
+digests, expire after 24 hours, and are consumed atomically when the user sets a
+password. Replacing a setup link invalidates the previous link. Neither user
+management nor any other role-authorized management operation requires MFA.
+All unsafe requests still require exact same-origin validation and a
+session-bound CSRF token.
 
 ## Recovery
 
@@ -113,9 +129,11 @@ TOTP seeds, verify password hashes, or add a valid factor.
 ## Sessions and audit
 
 Session identifiers remain opaque 256-bit values stored only as digests.
-Operators can list and revoke their sessions. Password changes, local recovery,
-factor changes, recovery-code use, and session revocation are audited without
-recording secrets, one-time codes, or WebAuthn challenge material.
+Users can list and individually revoke their sessions or revoke every other
+session. Password changes, local recovery, factor changes, recovery-code use,
+session revocation, and superuser account-management actions are audited
+without recording passwords, setup tokens, one-time codes, or WebAuthn
+challenge material.
 
 Forwarding headers are ignored unless the immediate peer matches an explicitly
 configured trusted-proxy CIDR. When trusted, the effective client address is

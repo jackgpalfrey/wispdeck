@@ -232,6 +232,9 @@ func TestMigrationFourPreservesAssuredSessions(t *testing.T) {
 	if user.MFASkipped {
 		t.Fatal("migration unexpectedly opted existing user out of MFA")
 	}
+	if user.Role != auth.RoleSuperuser || user.Status != auth.UserActive {
+		t.Fatalf("migrated user authority = (%q, %q)", user.Role, user.Status)
+	}
 }
 
 func TestSQLiteMFAStateLifecycle(t *testing.T) {

@@ -136,16 +136,16 @@ func NewPasskeyService(
 	repository PasskeyRepository,
 	authService *Service,
 	keys *KeyMaterial,
-	adminOrigin *url.URL,
+	appOrigin *url.URL,
 ) (*PasskeyService, error) {
 	if repository == nil || authService == nil || keys == nil {
 		return nil, errors.New("passkey repository, authentication service, and key material are required")
 	}
-	if adminOrigin == nil || adminOrigin.Hostname() == "" || adminOrigin.Scheme == "" {
-		return nil, errors.New("valid admin origin is required for WebAuthn")
+	if appOrigin == nil || appOrigin.Hostname() == "" || appOrigin.Scheme == "" {
+		return nil, errors.New("valid application origin is required for WebAuthn")
 	}
-	origin := adminOrigin.Scheme + "://" + adminOrigin.Host
-	rpID := adminOrigin.Hostname()
+	origin := appOrigin.Scheme + "://" + appOrigin.Host
+	rpID := appOrigin.Hostname()
 	webAuthn, err := webauthnlib.New(&webauthnlib.Config{
 		RPDisplayName:         "Wispdeck",
 		RPID:                  rpID,

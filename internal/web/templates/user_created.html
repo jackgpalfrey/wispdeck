@@ -1,0 +1,22 @@
+{{define "user_created.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>User created — Wispdeck</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+</head>
+<body>
+  <main class="panel wide">
+    <h1>User created</h1>
+    <p><strong>{{.Username}}</strong> was created as {{.Role}}.</p>
+    {{if .SetupURL}}
+      <p>Give this one-use setup link to the user. It will not be shown again unless you replace it.</p>
+      <input class="setup-secret" value="{{.SetupURL}}" readonly aria-label="Setup link">
+    {{else}}
+      <p>The permanent password is active. Wispdeck has not retained its plaintext value.</p>
+    {{end}}
+    <p><a href="/settings/users">Return to users</a></p>
+  </main>
+</body>
+</html>{{end}}

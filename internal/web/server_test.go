@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +73,7 @@ func newTestServer(t *testing.T, production bool) testServer {
 		t.Fatal(err)
 	}
 	server, err := New(Config{
-		AdminOrigin:     origin,
+		AppOrigin:       origin,
 		Development:     !production,
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		PasswordChecker: auth.NewStaticPasswordChecker(),
@@ -108,6 +110,44 @@ func responseCookie(t *testing.T, response *http.Response, name string) *http.Co
 	}
 	t.Fatalf("response did not set cookie %q: %#v", name, response.Cookies())
 	return nil
+}
+
+func passwordOnlyLogin(t *testing.T, server testServer, username, password string) (*http.Cookie, auth.Session) {
+	t.Helper()
+	login := request(http.MethodPost, "http://admin.example.test/login", url.Values{
+		"username": {username}, "password": {password},
+	})
+	login.Header.Set("Origin", "http://admin.example.test")
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, login)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("password login status = %d, body = %q", w.Code, w.Body.String())
+	}
+	cookie := responseCookie(t, w.Result(), "wispdeck_session")
+	session, err := server.authService.Authenticate(context.Background(), cookie.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Assurance == auth.AssuranceBootstrap {
+		skip := request(http.MethodPost, "http://admin.example.test/security/mfa/skip", url.Values{
+			"csrf_token": {session.CSRFToken},
+		})
+		skip.Header.Set("Origin", "http://admin.example.test")
+		skip.AddCookie(cookie)
+		w = httptest.NewRecorder()
+		server.handler.ServeHTTP(w, skip)
+		if w.Code != http.StatusSeeOther {
+			t.Fatalf("MFA skip status = %d, body = %q", w.Code, w.Body.String())
+		}
+		session, err = server.authService.Authenticate(context.Background(), cookie.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if session.Assurance != auth.AssurancePassword {
+		t.Fatalf("password-only assurance = %q", session.Assurance)
+	}
+	return cookie, session
 }
 
 func TestAdminBoundaryRejectsWrongHostAndSetsHeaders(t *testing.T) {
@@ -608,4 +648,183 @@ func TestPasskeyLoginPageOffersAnotherFactor(t *testing.T) {
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Use another method") || !strings.Contains(w.Body.String(), "Use passkey") || strings.Contains(w.Body.String(), "Skip MFA") {
 		t.Fatalf("passkey page = (%d, %q)", w.Code, w.Body.String())
 	}
+}
+
+func TestPasswordOnlySuperuserCanManageUsers(t *testing.T) {
+	server := newTestServer(t, false)
+	aliceCookie, alice := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+
+	users := request(http.MethodGet, "http://admin.example.test/settings/users", nil)
+	users.AddCookie(aliceCookie)
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, users)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Create with a permanent password") {
+		t.Fatalf("user management page = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	const bobPassword = "saffron-planetary-cello-woodland"
+	createPassword := request(http.MethodPost, "http://admin.example.test/settings/users/create-password", url.Values{
+		"csrf_token": {alice.CSRFToken}, "username": {"bob"}, "role": {"user"},
+		"password": {bobPassword}, "confirm_password": {bobPassword},
+	})
+	createPassword.Header.Set("Origin", "http://admin.example.test")
+	createPassword.AddCookie(aliceCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, createPassword)
+	if w.Code != http.StatusCreated || !strings.Contains(w.Body.String(), "bob") || strings.Contains(w.Body.String(), bobPassword) {
+		t.Fatalf("permanent-password user creation = (%d, %q)", w.Code, w.Body.String())
+	}
+	bobCookie, bob := passwordOnlyLogin(t, server, "bob", bobPassword)
+
+	forbidden := request(http.MethodGet, "http://admin.example.test/settings/users", nil)
+	forbidden.AddCookie(bobCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, forbidden)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("ordinary-user management status = %d", w.Code)
+	}
+
+	createSetup := request(http.MethodPost, "http://admin.example.test/settings/users/create-setup", url.Values{
+		"csrf_token": {alice.CSRFToken}, "username": {"charlie"}, "role": {"user"},
+	})
+	createSetup.Header.Set("Origin", "http://admin.example.test")
+	createSetup.AddCookie(aliceCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, createSetup)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("setup-link user creation = (%d, %q)", w.Code, w.Body.String())
+	}
+	match := regexp.MustCompile(`token=([A-Za-z0-9_-]+)`).FindStringSubmatch(w.Body.String())
+	if len(match) != 2 || !auth.ValidToken(match[1]) {
+		t.Fatalf("setup token not found in response: %q", w.Body.String())
+	}
+	setupToken := match[1]
+	events, err := server.authService.Events(context.Background(), alice, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if strings.Contains(event.Details, setupToken) {
+			t.Fatal("setup token was written to the audit trail")
+		}
+	}
+
+	setupPage := request(http.MethodGet, "http://admin.example.test/setup?token="+url.QueryEscape(setupToken), nil)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, setupPage)
+	if w.Code != http.StatusOK || w.Header().Get("Referrer-Policy") != "no-referrer" || !strings.Contains(w.Body.String(), "charlie") {
+		t.Fatalf("setup page = (%d, %q, %q)", w.Code, w.Header().Get("Referrer-Policy"), w.Body.String())
+	}
+	const charliePassword = "harbour-citron-orchestra-violet"
+	crossOrigin := request(http.MethodPost, "http://admin.example.test/setup", url.Values{
+		"token": {setupToken}, "password": {charliePassword}, "confirm_password": {charliePassword},
+	})
+	crossOrigin.Header.Set("Origin", "https://evil.example")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, crossOrigin)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin setup status = %d", w.Code)
+	}
+	complete := func() *httptest.ResponseRecorder {
+		r := request(http.MethodPost, "http://admin.example.test/setup", url.Values{
+			"token": {setupToken}, "password": {charliePassword}, "confirm_password": {charliePassword},
+		})
+		r.Header.Set("Origin", "http://admin.example.test")
+		response := httptest.NewRecorder()
+		server.handler.ServeHTTP(response, r)
+		return response
+	}
+	w = complete()
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Account ready") {
+		t.Fatalf("setup completion = (%d, %q)", w.Code, w.Body.String())
+	}
+	w = complete()
+	if w.Code != http.StatusGone {
+		t.Fatalf("reused setup status = %d", w.Code)
+	}
+	_, _ = passwordOnlyLogin(t, server, "charlie", charliePassword)
+
+	bobRecord, err := server.database.UserByUsername(context.Background(), "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disable := request(http.MethodPost, "http://admin.example.test/settings/users/status", url.Values{
+		"csrf_token": {alice.CSRFToken}, "user_id": {bobRecord.ID}, "status": {"disabled"},
+	})
+	disable.Header.Set("Origin", "http://admin.example.test")
+	disable.AddCookie(aliceCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, disable)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("disable user = (%d, %q)", w.Code, w.Body.String())
+	}
+	if _, err := server.authService.Authenticate(context.Background(), bobCookie.Value); !errors.Is(err, auth.ErrInvalidSession) {
+		t.Fatalf("disabled user's session survived: %v", err)
+	}
+	if bob.User.ID != bobRecord.ID {
+		t.Fatalf("bob session principal = %#v", bob.User)
+	}
+
+	demoteFinal := request(http.MethodPost, "http://admin.example.test/settings/users/role", url.Values{
+		"csrf_token": {alice.CSRFToken}, "user_id": {alice.User.ID}, "role": {"user"},
+	})
+	demoteFinal.Header.Set("Origin", "http://admin.example.test")
+	demoteFinal.AddCookie(aliceCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, demoteFinal)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "at least one active superuser") {
+		t.Fatalf("final-superuser response = (%d, %q)", w.Code, w.Body.String())
+	}
+}
+
+func TestPasswordOnlySelfServicePasswordAndSessions(t *testing.T) {
+	server := newTestServer(t, false)
+	firstCookie, first := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+	secondCookie, second := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+
+	security := request(http.MethodGet, "http://admin.example.test/security/passkeys", nil)
+	security.AddCookie(firstCookie)
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, security)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Change password") || !strings.Contains(w.Body.String(), "Revoke session") {
+		t.Fatalf("password-only self-service page = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	revoke := request(http.MethodPost, "http://admin.example.test/security/sessions/revoke", url.Values{
+		"csrf_token": {first.CSRFToken}, "session": {fmt.Sprintf("%x", second.TokenHash)},
+	})
+	revoke.Header.Set("Origin", "http://admin.example.test")
+	revoke.AddCookie(firstCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, revoke)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("individual session revoke = (%d, %q)", w.Code, w.Body.String())
+	}
+	if _, err := server.authService.Authenticate(context.Background(), secondCookie.Value); !errors.Is(err, auth.ErrInvalidSession) {
+		t.Fatalf("revoked session error = %v", err)
+	}
+
+	passwordPage := request(http.MethodGet, "http://admin.example.test/security/password", nil)
+	passwordPage.AddCookie(firstCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, passwordPage)
+	if w.Code != http.StatusOK {
+		t.Fatalf("password-only password page = (%d, %q)", w.Code, w.Body.String())
+	}
+	const newPassword = "marigold-telescope-river-canvas"
+	change := request(http.MethodPost, "http://admin.example.test/security/password", url.Values{
+		"csrf_token": {first.CSRFToken}, "current_password": {"correct horse battery staple"},
+		"new_password": {newPassword}, "confirm_password": {newPassword},
+	})
+	change.Header.Set("Origin", "http://admin.example.test")
+	change.AddCookie(firstCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, change)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Password changed") {
+		t.Fatalf("password-only password change = (%d, %q)", w.Code, w.Body.String())
+	}
+	if _, err := server.authService.Authenticate(context.Background(), firstCookie.Value); !errors.Is(err, auth.ErrInvalidSession) {
+		t.Fatalf("password-changing session survived: %v", err)
+	}
+	_, _ = passwordOnlyLogin(t, server, "alice", newPassword)
 }

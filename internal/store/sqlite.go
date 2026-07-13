@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ErrUserExists = errors.New("user already exists")
+var ErrUserExists = auth.ErrUserExists
 
 type SQLite struct {
 	db *sql.DB
@@ -64,52 +64,44 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 func (s *SQLite) Close() error { return s.db.Close() }
 
 func (s *SQLite) CreateUser(ctx context.Context, username, passwordHash string, now time.Time) (auth.User, error) {
-	id, err := randomID()
-	if err != nil {
-		return auth.User{}, err
-	}
-	result, err := s.db.ExecContext(ctx, `
-		INSERT INTO users (id, username, password_hash, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(username) DO NOTHING`, id, username, passwordHash, unix(now), unix(now))
-	if err != nil {
-		return auth.User{}, fmt.Errorf("insert user: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return auth.User{}, fmt.Errorf("inspect user insert: %w", err)
-	}
-	if rows != 1 {
-		return auth.User{}, ErrUserExists
-	}
-	return auth.User{ID: id, Username: username, PasswordHash: passwordHash}, nil
+	return s.CreateManagedUser(ctx, username, passwordHash, auth.RoleSuperuser, auth.UserActive, now)
 }
 
 func (s *SQLite) UserByUsername(ctx context.Context, username string) (auth.User, error) {
 	var user auth.User
+	var createdAt, updatedAt int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, username, password_hash, mfa_skipped FROM users WHERE username = ?`, username,
-	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.MFASkipped)
+		`SELECT id, username, password_hash, mfa_skipped, role, status, created_at, updated_at
+		 FROM users WHERE username = ?`, username,
+	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.MFASkipped,
+		&user.Role, &user.Status, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return auth.User{}, auth.ErrUserNotFound
 	}
 	if err != nil {
 		return auth.User{}, fmt.Errorf("query user: %w", err)
 	}
+	user.CreatedAt = time.Unix(createdAt, 0).UTC()
+	user.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return user, nil
 }
 
 func (s *SQLite) UserByID(ctx context.Context, userID string) (auth.User, error) {
 	var user auth.User
+	var createdAt, updatedAt int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, username, password_hash, mfa_skipped FROM users WHERE id = ?`, userID,
-	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.MFASkipped)
+		`SELECT id, username, password_hash, mfa_skipped, role, status, created_at, updated_at
+		 FROM users WHERE id = ?`, userID,
+	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.MFASkipped,
+		&user.Role, &user.Status, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return auth.User{}, auth.ErrUserNotFound
 	}
 	if err != nil {
 		return auth.User{}, fmt.Errorf("query user by ID: %w", err)
 	}
+	user.CreatedAt = time.Unix(createdAt, 0).UTC()
+	user.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return user, nil
 }
 
@@ -161,13 +153,14 @@ func (s *SQLite) CreateSession(ctx context.Context, session auth.SessionRecord) 
 			assurance, authenticated_at, client_ip, user_agent
 		)
 		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE ? <> ? OR EXISTS (
-			SELECT 1 FROM users WHERE id = ? AND mfa_skipped = 1
+		WHERE EXISTS (
+			SELECT 1 FROM users
+			WHERE id = ? AND status = ? AND (? <> ? OR mfa_skipped = 1)
 		)`,
 		session.TokenHash[:], session.UserID, session.CSRFToken,
 		unix(session.CreatedAt), unix(session.LastSeen), unix(session.ExpiresAt),
 		session.Assurance, unix(session.AuthenticatedAt), session.ClientIP, session.UserAgent,
-		session.Assurance, auth.AssurancePassword, session.UserID,
+		session.UserID, auth.UserActive, session.Assurance, auth.AssurancePassword,
 	)
 	if err != nil {
 		return fmt.Errorf("insert session: %w", err)
@@ -185,14 +178,14 @@ func (s *SQLite) SessionByTokenHash(ctx context.Context, digest [32]byte) (auth.
 	err := s.db.QueryRowContext(ctx, `
 		SELECT s.token_hash, s.csrf_token, s.assurance, s.created_at, s.authenticated_at,
 		       s.last_seen, s.expires_at, s.client_ip, s.user_agent,
-		       u.id, u.username
+		       u.id, u.username, u.role
 		FROM sessions AS s
 		JOIN users AS u ON u.id = s.user_id
-		WHERE s.token_hash = ?`, digest[:],
+		WHERE s.token_hash = ? AND u.status = ?`, digest[:], auth.UserActive,
 	).Scan(
 		&tokenHash, &session.CSRFToken, &session.Assurance, &createdAt, &authenticatedAt,
 		&lastSeen, &expiresAt, &session.ClientIP, &session.UserAgent,
-		&session.User.ID, &session.User.Username,
+		&session.User.ID, &session.User.Username, &session.User.Role,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return auth.Session{}, auth.ErrInvalidSession

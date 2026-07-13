@@ -4,7 +4,8 @@ Wispdeck is a self-hosted home for links and lightweight websites that wake on
 demand.
 
 The project is at the beginning of its implementation. Its first implemented
-slice is the production administrative authentication boundary. See
+slice is the production application authentication boundary, including local
+user and superuser management. See
 [`docs/security-model.md`](docs/security-model.md) and
 [`docs/authentication.md`](docs/authentication.md) for the contracts that shape
 it.
@@ -20,7 +21,7 @@ go vet ./...
 ```
 
 Generate the installation authentication key before creating the first local
-administrator. Neither operation puts a secret in shell history:
+superuser. Neither operation puts a secret in shell history:
 
 ```sh
 go build -o wispdeck ./cmd/wispdeck
@@ -36,17 +37,18 @@ blocklist and the padded Have I Been Pwned range API.
 CLI operations.
 
 For a production deployment, terminate TLS at a reverse proxy that preserves
-the original `Host` header, then provide the exact public admin origin:
+the original `Host` header, then provide the exact public application origin:
 
 ```sh
 ./wispdeck serve \
-  --admin-origin https://admin.example.com \
+  --app-origin https://wispdeck.example.com \
   --trusted-proxy 127.0.0.1/32
 ```
 
 Only configure a trusted proxy range that is under your control; forwarding
 headers from every other peer are ignored. The proxy must preserve the original
-`Host` header. The admin origin must never serve hosted user content.
+`Host` header. The application origin may serve the management interface and
+short-link redirects, but must never serve hosted user content.
 
 `--development` permits HTTP and insecurely transported cookies for local
 testing, forces a loopback listener, and must not be used as a production

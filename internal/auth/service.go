@@ -15,6 +15,12 @@ var (
 	ErrInvalidSession     = errors.New("invalid session")
 	ErrUserNotFound       = errors.New("user not found")
 	ErrPasswordMismatch   = errors.New("current password is incorrect")
+	ErrForbidden          = errors.New("forbidden")
+	ErrLastSuperuser      = errors.New("cannot remove the final active superuser")
+	ErrInvalidSetupToken  = errors.New("invalid or expired setup token")
+	ErrInvalidUserState   = errors.New("invalid user state transition")
+	ErrUserExists         = errors.New("user already exists")
+	ErrInvalidRole        = errors.New("invalid role")
 )
 
 // #nosec G101 -- this fixed, non-secret input equalizes verification timing for unknown accounts.
@@ -25,11 +31,39 @@ type User struct {
 	Username     string
 	PasswordHash string
 	MFASkipped   bool
+	Role         Role
+	Status       UserStatus
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 type Principal struct {
 	ID       string
 	Username string
+	Role     Role
+}
+
+type Role string
+
+const (
+	RoleUser      Role = "user"
+	RoleSuperuser Role = "superuser"
+)
+
+func ValidRole(role Role) bool {
+	return role == RoleUser || role == RoleSuperuser
+}
+
+type UserStatus string
+
+const (
+	UserPending  UserStatus = "pending"
+	UserActive   UserStatus = "active"
+	UserDisabled UserStatus = "disabled"
+)
+
+func ValidUserStatus(status UserStatus) bool {
+	return status == UserPending || status == UserActive || status == UserDisabled
 }
 
 type Assurance string
@@ -80,6 +114,15 @@ type Repository interface {
 	DeleteOtherSessions(context.Context, string, [32]byte) error
 	AuthEventsByUser(context.Context, string, int) ([]AuthEvent, error)
 	RecordAuthEvent(context.Context, AuthEvent) error
+	Users(context.Context) ([]UserSummary, error)
+	CreateManagedUser(context.Context, string, string, Role, UserStatus, time.Time) (User, error)
+	CreatePendingUser(context.Context, string, string, Role, SetupTokenRecord) (User, error)
+	SetupByTokenHash(context.Context, [32]byte, time.Time) (UserSetup, error)
+	CompleteUserSetup(context.Context, [32]byte, string, time.Time) (User, error)
+	ReplaceUserSetupToken(context.Context, string, SetupTokenRecord) error
+	UpdateUserRole(context.Context, string, Role, time.Time) (User, error)
+	UpdateUserStatus(context.Context, string, UserStatus, time.Time) (User, error)
+	DeleteUserSession(context.Context, string, [32]byte) error
 }
 
 type AuthEvent struct {
@@ -120,17 +163,6 @@ func NewService(repository Repository, passwords *PasswordManager) (*Service, er
 	}, nil
 }
 
-// Login verifies credentials and creates a new server-side session. clientIP
-// is used only for the security audit event and must already be derived from a
-// trusted transport boundary.
-func (s *Service) Login(ctx context.Context, username, password, clientIP string) (string, Session, error) {
-	user, err := s.VerifyCredentials(ctx, username, password, clientIP)
-	if err != nil {
-		return "", Session{}, err
-	}
-	return s.NewSession(ctx, user, AssuranceMFA, clientIP, "")
-}
-
 func (s *Service) VerifyCredentials(ctx context.Context, username, password, clientIP string) (User, error) {
 	normalized := NormalizeUsername(username)
 	user, err := s.repository.UserByUsername(ctx, normalized)
@@ -146,7 +178,7 @@ func (s *Service) VerifyCredentials(ctx context.Context, username, password, cli
 	if verifyErr != nil {
 		return User{}, fmt.Errorf("verify stored password hash: %w", verifyErr)
 	}
-	if err != nil || !matched {
+	if err != nil || !matched || user.Status != UserActive {
 		auditUsername := normalized
 		auditUserID := ""
 		if ValidateUsername(auditUsername) != nil {
@@ -208,7 +240,7 @@ func (s *Service) NewSession(ctx context.Context, user User, assurance Assurance
 	}
 	session := Session{
 		TokenHash:       record.TokenHash,
-		User:            Principal{ID: user.ID, Username: user.Username},
+		User:            Principal{ID: user.ID, Username: user.Username, Role: user.Role},
 		CSRFToken:       record.CSRFToken,
 		Assurance:       record.Assurance,
 		CreatedAt:       record.CreatedAt,
@@ -279,8 +311,8 @@ func (s *Service) ChangePassword(
 	checker PasswordChecker,
 	passwordContext PasswordContext,
 ) error {
-	if session.Assurance != AssuranceMFA || s.now().UTC().Sub(session.AuthenticatedAt) > recentAuthentication {
-		return ErrRecentMFARequired
+	if session.Assurance == AssuranceRecovery {
+		return ErrForbidden
 	}
 	user, err := s.repository.UserByID(ctx, session.User.ID)
 	if err != nil {
@@ -321,15 +353,23 @@ func (s *Service) Sessions(ctx context.Context, session Session) ([]SessionSumma
 }
 
 func (s *Service) RevokeOtherSessions(ctx context.Context, session Session) error {
-	if session.Assurance != AssuranceMFA {
-		return ErrPasskeyRequired
-	}
 	if err := s.repository.DeleteOtherSessions(ctx, session.User.ID, session.TokenHash); err != nil {
 		return fmt.Errorf("revoke other sessions: %w", err)
 	}
 	s.recordEvent(ctx, AuthEvent{
 		OccurredAt: s.now().UTC(), Kind: "sessions_revoked", Username: session.User.Username,
 		UserID: session.User.ID, ClientIP: session.ClientIP,
+	})
+	return nil
+}
+
+func (s *Service) RevokeSession(ctx context.Context, session Session, digest [32]byte) error {
+	if err := s.repository.DeleteUserSession(ctx, session.User.ID, digest); err != nil {
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	s.recordEvent(ctx, AuthEvent{
+		OccurredAt: s.now().UTC(), Kind: "session_revoked", Username: session.User.Username,
+		UserID: session.User.ID, ClientIP: session.ClientIP, Details: fmt.Sprintf("session=%x", digest[:8]),
 	})
 	return nil
 }

@@ -1,29 +1,33 @@
 # Security model
 
-Status: initial v1 contract, 2026-07-11.
+Status: v1 implementation contract, 2026-07-13.
 
 ## Deployment boundary
 
 Wispdeck has two different trust zones:
 
-1. The **admin origin** serves Wispdeck's management interface.
+1. The **application origin** serves Wispdeck's management interface and may
+   also serve short-link redirects.
 2. **Content origins** serve user-uploaded HTML, CSS, and JavaScript.
 
-User content is untrusted. It must never be served from the admin origin. The
-admin session cookie is host-only and is never scoped to a parent domain.
+User content is untrusted. It must never be served from the application origin.
+The application session cookie is host-only and is never scoped to a parent domain.
 Sibling subdomains are different origins but the same browser "site", so
-`SameSite` cookies alone are not an adequate CSRF defence. All unsafe admin
+`SameSite` cookies alone are not an adequate CSRF defence. All unsafe application
 requests require an exact `Origin`, same-origin `Referer`, or the
 browser-controlled `Sec-Fetch-Site: same-origin` fallback. Authenticated unsafe
 requests also require a session-bound CSRF token.
 
-The v1 server has local administrative users and no public registration, email
-recovery, API tokens, or delegated authorization. Every local user has full
-administrative control; roles require a separate authorization design.
+The v1 server has local users and no public registration, email recovery, API
+tokens, or delegated authorization. Users have either the `user` or
+`superuser` role. Superusers can create, disable, enable, and change the role of
+other users; the final active superuser is protected by a transactional
+database invariant. User status and role changes apply to existing sessions
+immediately.
 
 ## Passwords and bootstrap
 
-- The initial administrator is created locally with `wispdeck admin create`.
+- The initial superuser is created locally with `wispdeck admin create`.
 - Passwords are never accepted in command-line arguments or environment
   variables. Automation may provide them through standard input explicitly.
 - Passwords must contain 15 to 256 Unicode code points and may contain spaces.
@@ -45,7 +49,8 @@ more broadly compatible alternative; its encrypted seed, single-use counters,
 clock window, and rate limits are defined in `authentication.md`. Bootstrap
 and recovery sessions are capability-restricted and cannot administer
 Wispdeck. A deliberately opted-out password-only session can perform normal
-administration, but not operations that require recent MFA.
+administration. User management does not require MFA. Existing-factor changes
+retain their separate recent-authentication rules.
 
 ## Sessions
 
@@ -56,7 +61,8 @@ administration, but not operations that require recent MFA.
 - Sessions have a 30-minute idle timeout and a 12-hour absolute lifetime.
 - Logout deletes the server-side session before expiring the browser cookie.
 - Authenticated responses use `Cache-Control: no-store`.
-- Operators can inspect recent authentication events and revoke other sessions.
+- Users can inspect recent authentication events and revoke individual or all
+  other sessions.
 
 ## Login abuse controls
 

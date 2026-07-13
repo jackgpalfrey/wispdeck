@@ -1,0 +1,17 @@
+{{define "setup_link.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Setup link replaced — Wispdeck</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+</head>
+<body>
+  <main class="panel wide">
+    <h1>Setup link replaced</h1>
+    <p>The previous link is invalid. Give this new one-use link to the user:</p>
+    <input class="setup-secret" value="{{.SetupURL}}" readonly aria-label="Setup link">
+    <p><a href="/settings/users">Return to users</a></p>
+  </main>
+</body>
+</html>{{end}}

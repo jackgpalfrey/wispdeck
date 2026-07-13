@@ -51,6 +51,7 @@ func (r *memoryRepository) CreateSession(_ context.Context, record SessionRecord
 		User: Principal{
 			ID:       r.user.ID,
 			Username: r.user.Username,
+			Role:     r.user.Role,
 		},
 		CSRFToken:       record.CSRFToken,
 		Assurance:       record.Assurance,
@@ -111,6 +112,47 @@ func (r *memoryRepository) DeleteOtherSessions(_ context.Context, userID string,
 	return nil
 }
 
+func (r *memoryRepository) DeleteUserSession(_ context.Context, userID string, digest [32]byte) error {
+	session, ok := r.sessions[digest]
+	if !ok || session.User.ID != userID {
+		return ErrInvalidSession
+	}
+	delete(r.sessions, digest)
+	return nil
+}
+
+func (r *memoryRepository) Users(context.Context) ([]UserSummary, error) {
+	return []UserSummary{{ID: r.user.ID, Username: r.user.Username, Role: r.user.Role, Status: r.user.Status}}, nil
+}
+
+func (r *memoryRepository) CreateManagedUser(context.Context, string, string, Role, UserStatus, time.Time) (User, error) {
+	return User{}, errors.New("not implemented")
+}
+
+func (r *memoryRepository) CreatePendingUser(context.Context, string, string, Role, SetupTokenRecord) (User, error) {
+	return User{}, errors.New("not implemented")
+}
+
+func (r *memoryRepository) SetupByTokenHash(context.Context, [32]byte, time.Time) (UserSetup, error) {
+	return UserSetup{}, ErrInvalidSetupToken
+}
+
+func (r *memoryRepository) CompleteUserSetup(context.Context, [32]byte, string, time.Time) (User, error) {
+	return User{}, ErrInvalidSetupToken
+}
+
+func (r *memoryRepository) ReplaceUserSetupToken(context.Context, string, SetupTokenRecord) error {
+	return ErrInvalidSetupToken
+}
+
+func (r *memoryRepository) UpdateUserRole(context.Context, string, Role, time.Time) (User, error) {
+	return User{}, errors.New("not implemented")
+}
+
+func (r *memoryRepository) UpdateUserStatus(context.Context, string, UserStatus, time.Time) (User, error) {
+	return User{}, errors.New("not implemented")
+}
+
 func (r *memoryRepository) AuthEventsByUser(_ context.Context, userID string, limit int) ([]AuthEvent, error) {
 	var events []AuthEvent
 	for i := len(r.events) - 1; i >= 0 && len(events) < limit; i-- {
@@ -134,7 +176,10 @@ func newServiceTest(t *testing.T) (*Service, *memoryRepository, *time.Time) {
 		t.Fatal(err)
 	}
 	repository := &memoryRepository{
-		user:     User{ID: "user-1", Username: "alice", PasswordHash: hash},
+		user: User{
+			ID: "user-1", Username: "alice", PasswordHash: hash,
+			Role: RoleSuperuser, Status: UserActive,
+		},
 		sessions: make(map[[32]byte]Session),
 	}
 	keys, err := NewKeyMaterial(bytes.Repeat([]byte{0x42}, 32))
@@ -156,7 +201,11 @@ func newServiceTest(t *testing.T) (*Service, *memoryRepository, *time.Time) {
 
 func TestServiceSessionIdleTimeout(t *testing.T) {
 	service, repository, now := newServiceTest(t)
-	token, _, err := service.Login(context.Background(), "Alice", "correct horse battery staple", "192.0.2.1")
+	user, err := service.VerifyCredentials(context.Background(), "Alice", "correct horse battery staple", "192.0.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := service.NewSession(context.Background(), user, AssuranceMFA, "192.0.2.1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +224,11 @@ func TestServiceSessionIdleTimeout(t *testing.T) {
 
 func TestServiceSessionAbsoluteLifetime(t *testing.T) {
 	service, _, now := newServiceTest(t)
-	token, _, err := service.Login(context.Background(), "alice", "correct horse battery staple", "192.0.2.1")
+	user, err := service.VerifyCredentials(context.Background(), "alice", "correct horse battery staple", "192.0.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := service.NewSession(context.Background(), user, AssuranceMFA, "192.0.2.1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,8 +247,8 @@ func TestServiceSessionAbsoluteLifetime(t *testing.T) {
 func TestServiceUsesGenericCredentialFailure(t *testing.T) {
 	service, repository, _ := newServiceTest(t)
 	for _, username := range []string{"alice", "unknown", string(make([]byte, 128))} {
-		if _, _, err := service.Login(context.Background(), username, "incorrect password phrase", "192.0.2.1"); !errors.Is(err, ErrInvalidCredentials) {
-			t.Fatalf("Login(%q) error = %v", username, err)
+		if _, err := service.VerifyCredentials(context.Background(), username, "incorrect password phrase", "192.0.2.1"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("VerifyCredentials(%q) error = %v", username, err)
 		}
 	}
 	if got := repository.events[len(repository.events)-1].Username; got != "" {
@@ -207,7 +260,7 @@ type allowPasswordChecker struct{}
 
 func (allowPasswordChecker) Check(context.Context, string, PasswordContext) error { return nil }
 
-func TestChangePasswordRequiresRecentMFAAndRevokesSessions(t *testing.T) {
+func TestChangePasswordRevokesSessions(t *testing.T) {
 	service, repository, _ := newServiceTest(t)
 	user := repository.user
 	_, session, err := service.NewSession(context.Background(), user, AssuranceMFA, "192.0.2.1", "browser")
@@ -230,7 +283,7 @@ func TestChangePasswordRequiresRecentMFAAndRevokesSessions(t *testing.T) {
 	}
 }
 
-func TestChangePasswordRejectsBootstrapSession(t *testing.T) {
+func TestChangePasswordAllowsBootstrapSessionWithCurrentPassword(t *testing.T) {
 	service, repository, _ := newServiceTest(t)
 	_, session, err := service.NewSession(context.Background(), repository.user, AssuranceBootstrap, "192.0.2.1", "browser")
 	if err != nil {
@@ -241,7 +294,7 @@ func TestChangePasswordRejectsBootstrapSession(t *testing.T) {
 		"correct horse battery staple", "saffron-planetary-cello-woodland",
 		allowPasswordChecker{}, PasswordContext{},
 	)
-	if !errors.Is(err, ErrRecentMFARequired) {
+	if err != nil {
 		t.Fatalf("ChangePassword error = %v", err)
 	}
 }

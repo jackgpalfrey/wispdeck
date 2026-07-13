@@ -66,7 +66,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, logger *slog.Logger) 
 }
 
 const usage = `Usage:
-  wispdeck serve --admin-origin https://admin.example.com [options]
+  wispdeck serve --app-origin https://wispdeck.example.com [options]
   wispdeck admin create --username USER [options]
   wispdeck admin reset-mfa --username USER --yes [options]
   wispdeck admin reset-password --username USER --yes [options]
@@ -82,7 +82,7 @@ func serve(args []string, logger *slog.Logger) error {
 	database := flags.String("database", "data/wispdeck.db", "control database path")
 	authKey := flags.String("auth-key", "data/auth.key", "installation authentication key path")
 	listen := flags.String("listen", "127.0.0.1:8080", "HTTP listen address")
-	adminOrigin := flags.String("admin-origin", "", "public admin origin (required)")
+	appOrigin := flags.String("app-origin", "", "public application origin (required)")
 	development := flags.Bool("development", false, "allow HTTP and insecure cookies for local development")
 	offlinePasswordCheck := flags.Bool("offline-password-check", false, "use only the built-in password blocklist")
 	var trustedProxies stringListFlag
@@ -96,9 +96,12 @@ func serve(args []string, logger *slog.Logger) error {
 	if *development && !loopbackAddress(*listen) {
 		return errors.New("development mode may listen only on a loopback address")
 	}
-	origin, err := url.Parse(*adminOrigin)
+	if *appOrigin == "" {
+		return errors.New("serve requires --app-origin")
+	}
+	origin, err := url.Parse(*appOrigin)
 	if err != nil {
-		return fmt.Errorf("parse admin origin: %w", err)
+		return fmt.Errorf("parse application origin: %w", err)
 	}
 	ctx := context.Background()
 	databaseStore, err := store.OpenSQLite(ctx, *database)
@@ -131,7 +134,7 @@ func serve(args []string, logger *slog.Logger) error {
 		passwordChecker = auth.NewCombinedPasswordChecker(passwordChecker, auth.NewPwnedPasswordChecker(nil))
 	}
 	webServer, err := web.New(web.Config{
-		AdminOrigin:       origin,
+		AppOrigin:         origin,
 		Development:       *development,
 		Logger:            logger,
 		PasswordChecker:   passwordChecker,
@@ -160,7 +163,7 @@ func serve(args []string, logger *slog.Logger) error {
 			logger.Error("graceful shutdown failed", "error", err)
 		}
 	}()
-	logger.Info("starting Wispdeck admin server", "listen", *listen, "origin", origin.String())
+	logger.Info("starting Wispdeck application server", "listen", *listen, "origin", origin.String())
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve HTTP: %w", err)
 	}
@@ -192,7 +195,7 @@ func createAdmin(args []string, stdin io.Reader, stdout io.Writer) error {
 	flags := flag.NewFlagSet("admin create", flag.ContinueOnError)
 	database := flags.String("database", "data/wispdeck.db", "control database path")
 	authKey := flags.String("auth-key", "data/auth.key", "installation authentication key path")
-	usernameFlag := flags.String("username", "", "administrator username")
+	usernameFlag := flags.String("username", "", "superuser username")
 	passwordStdin := flags.Bool("password-stdin", false, "read password and confirmation as two lines from standard input")
 	skipCompromisedCheck := flags.Bool("skip-compromised-password-check", false, "use only the built-in offline password blocklist")
 	if err := flags.Parse(args); err != nil {
@@ -242,7 +245,7 @@ func createAdmin(args []string, stdin io.Reader, stdout io.Writer) error {
 	if _, err := databaseStore.CreateUser(ctx, username, passwordHash, time.Now().UTC()); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "Created administrator %q.\n", username)
+	_, err = fmt.Fprintf(stdout, "Created superuser %q.\n", username)
 	return err
 }
 
@@ -265,7 +268,7 @@ func generateAuthKey(args []string, stdout io.Writer) error {
 func resetMFA(args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("admin reset-mfa", flag.ContinueOnError)
 	database := flags.String("database", "data/wispdeck.db", "control database path")
-	usernameFlag := flags.String("username", "", "administrator username")
+	usernameFlag := flags.String("username", "", "user username")
 	confirmed := flags.Bool("yes", false, "confirm destructive local recovery")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -300,7 +303,7 @@ func resetPassword(args []string, stdin io.Reader, stdout io.Writer) error {
 	flags := flag.NewFlagSet("admin reset-password", flag.ContinueOnError)
 	database := flags.String("database", "data/wispdeck.db", "control database path")
 	authKey := flags.String("auth-key", "data/auth.key", "installation authentication key path")
-	usernameFlag := flags.String("username", "", "administrator username")
+	usernameFlag := flags.String("username", "", "user username")
 	passwordStdin := flags.Bool("password-stdin", false, "read password and confirmation as two lines from standard input")
 	skipCompromisedCheck := flags.Bool("skip-compromised-password-check", false, "use only the built-in offline password blocklist")
 	confirmed := flags.Bool("yes", false, "confirm destructive local recovery")

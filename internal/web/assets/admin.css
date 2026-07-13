@@ -28,6 +28,7 @@ form {
 }
 
 input,
+select,
 button {
   box-sizing: border-box;
   width: 100%;

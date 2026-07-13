@@ -74,12 +74,21 @@
         <button type="submit" class="secondary">Generate new recovery codes</button>
       </form>
     </section>
+    {{end}}
 
     <section>
       <h2>Sessions</h2>
       <ul class="records">
         {{range .Sessions}}
-        <li><strong>{{.Assurance}}</strong><span class="subtle">{{.ClientIP}} · {{.UserAgent}} · last active {{.LastSeen.Format "2006-01-02 15:04 UTC"}}</span></li>
+        <li>
+          <strong>{{.Assurance}}{{if eq .TokenHash $.CurrentSession}} · current{{end}}</strong>
+          <span class="subtle">{{.ClientIP}} · {{.UserAgent}} · last active {{.LastSeen.Format "2006-01-02 15:04 UTC"}}</span>
+          <form action="/security/sessions/revoke" method="post">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="session" value="{{printf "%x" .TokenHash}}">
+            <button type="submit" class="danger">{{if eq .TokenHash $.CurrentSession}}Sign out this session{{else}}Revoke session{{end}}</button>
+          </form>
+        </li>
         {{end}}
       </ul>
       <form action="/security/sessions/revoke-others" method="post">
@@ -88,7 +97,9 @@
       </form>
     </section>
 
+    {{if ne .Assurance "recovery"}}
     <p><a href="/security/password">Change password</a></p>
+    {{end}}
 
     <section>
       <h2>Recent authentication activity</h2>
@@ -98,7 +109,6 @@
         {{else}}<li class="subtle">No events recorded yet.</li>{{end}}
       </ul>
     </section>
-    {{end}}
 
     <section id="recovery-codes" class="hidden" aria-live="polite">
       <h2>Save these recovery codes</h2>

@@ -1,4 +1,4 @@
-// Package web implements Wispdeck's administrative HTTP boundary.
+// Package web implements Wispdeck's trusted application HTTP boundary.
 package web
 
 import (
@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,7 +32,7 @@ const (
 )
 
 type Config struct {
-	AdminOrigin       *url.URL
+	AppOrigin         *url.URL
 	Development       bool
 	Logger            *slog.Logger
 	PasswordChecker   auth.PasswordChecker
@@ -112,15 +113,15 @@ func New(
 func (s *Server) Handler() http.Handler { return s.handler }
 
 func validateConfig(config Config) error {
-	if config.AdminOrigin == nil {
-		return errors.New("admin origin is required")
+	if config.AppOrigin == nil {
+		return errors.New("application origin is required")
 	}
-	u := config.AdminOrigin
+	u := config.AppOrigin
 	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return errors.New("admin origin must contain only a scheme and host")
+		return errors.New("application origin must contain only a scheme and host")
 	}
 	if u.Scheme != "https" && !(config.Development && u.Scheme == "http") {
-		return errors.New("admin origin must use HTTPS outside development mode")
+		return errors.New("application origin must use HTTPS outside development mode")
 	}
 	return nil
 }
@@ -130,6 +131,8 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /assets/", s.assets())
 	mux.HandleFunc("GET /login", s.loginPage)
 	mux.HandleFunc("POST /login", s.login)
+	mux.HandleFunc("GET /setup", s.userSetupPage)
+	mux.HandleFunc("POST /setup", s.completeUserSetup)
 	mux.HandleFunc("GET /login/passkey", s.passkeyLoginPage)
 	mux.HandleFunc("POST /login/recovery", s.recoveryLogin)
 	mux.HandleFunc("POST /login/totp", s.totpLogin)
@@ -148,8 +151,15 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /security/totp/delete", s.requireSession(http.HandlerFunc(s.deleteTOTP)))
 	mux.Handle("POST /security/recovery-codes/rotate", s.requireSession(http.HandlerFunc(s.rotateRecoveryCodes)))
 	mux.Handle("POST /security/sessions/revoke-others", s.requireSession(http.HandlerFunc(s.revokeOtherSessions)))
+	mux.Handle("POST /security/sessions/revoke", s.requireSession(http.HandlerFunc(s.revokeSession)))
 	mux.Handle("GET /security/password", s.requireSession(http.HandlerFunc(s.passwordPage)))
 	mux.Handle("POST /security/password", s.requireSession(http.HandlerFunc(s.changePassword)))
+	mux.Handle("GET /settings/users", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.usersPage))))
+	mux.Handle("POST /settings/users/create-setup", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.createUserWithSetup))))
+	mux.Handle("POST /settings/users/create-password", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.createUserWithPassword))))
+	mux.Handle("POST /settings/users/role", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.changeUserRole))))
+	mux.Handle("POST /settings/users/status", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.changeUserStatus))))
+	mux.Handle("POST /settings/users/setup-link", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.replaceUserSetupLink))))
 	return s.securityBoundary(mux)
 }
 
@@ -174,7 +184,7 @@ func (s *Server) securityBoundary(next http.Handler) http.Handler {
 		if !s.config.Development {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}
-		if !equalHost(r.Host, s.config.AdminOrigin.Host) {
+		if !equalHost(r.Host, s.config.AppOrigin.Host) {
 			http.Error(w, "misdirected request", http.StatusMisdirectedRequest)
 			return
 		}
@@ -265,7 +275,278 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		Username  string
 		CSRFToken string
 		Assurance auth.Assurance
-	}{Username: session.User.Username, CSRFToken: session.CSRFToken, Assurance: session.Assurance})
+		Role      auth.Role
+	}{Username: session.User.Username, CSRFToken: session.CSRFToken, Assurance: session.Assurance, Role: session.User.Role})
+}
+
+type userSetupView struct {
+	Token    string
+	Username string
+	Error    string
+}
+
+func (s *Server) userSetupPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	token := r.URL.Query().Get("token")
+	setup, err := s.auth.UserSetup(r.Context(), token)
+	if err != nil {
+		if !errors.Is(err, auth.ErrInvalidSetupToken) {
+			s.config.Logger.ErrorContext(r.Context(), "load user setup", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		s.render(w, http.StatusGone, "message.html", struct {
+			Title   string
+			Message string
+		}{"Setup link unavailable", "This account setup link is invalid or has expired."})
+		return
+	}
+	s.render(w, http.StatusOK, "user_setup.html", userSetupView{
+		Token: token, Username: setup.Username,
+	})
+}
+
+func (s *Server) completeUserSetup(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	if !s.validBrowserOrigin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	token := r.PostForm.Get("token")
+	setupKey := fmt.Sprintf("user-setup:%x", sha256.Sum256([]byte(token)))
+	if !s.limiter.Allow(setupKey, s.clientAddress(r)) {
+		s.render(w, http.StatusTooManyRequests, "message.html", struct {
+			Title   string
+			Message string
+		}{"Too many setup attempts", "Wait a minute before trying this setup link again."})
+		return
+	}
+	setup, err := s.auth.UserSetup(r.Context(), token)
+	if err != nil {
+		if !errors.Is(err, auth.ErrInvalidSetupToken) {
+			s.config.Logger.ErrorContext(r.Context(), "load user setup", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		s.render(w, http.StatusGone, "message.html", struct {
+			Title   string
+			Message string
+		}{"Setup link unavailable", "This account setup link is invalid or has expired."})
+		return
+	}
+	password := r.PostForm.Get("password")
+	if password != r.PostForm.Get("confirm_password") {
+		s.render(w, http.StatusBadRequest, "user_setup.html", userSetupView{
+			Token: token, Username: setup.Username, Error: "Passwords do not match.",
+		})
+		return
+	}
+	_, err = s.auth.CompleteUserSetup(
+		r.Context(), token, password, s.passwordChecker,
+		auth.PasswordContext{
+			Service: "wispdeck", Domain: s.config.AppOrigin.Hostname(),
+		},
+		s.clientAddress(r),
+	)
+	if err != nil {
+		if !errors.Is(err, auth.ErrInvalidSetupToken) &&
+			!errors.Is(err, auth.ErrCompromisedPassword) &&
+			!errors.Is(err, auth.ErrPasswordCheckFailed) &&
+			!errors.Is(err, auth.ErrPasswordTooShort) &&
+			!errors.Is(err, auth.ErrPasswordTooLong) &&
+			!errors.Is(err, auth.ErrPasswordInvalid) {
+			s.config.Logger.ErrorContext(r.Context(), "complete user setup", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		message := passwordErrorMessage(err, "Password could not be set.")
+		status := http.StatusBadRequest
+		if errors.Is(err, auth.ErrInvalidSetupToken) {
+			status = http.StatusGone
+			message = "This account setup link is invalid or has expired."
+		}
+		s.render(w, status, "user_setup.html", userSetupView{
+			Token: token, Username: setup.Username, Error: message,
+		})
+		return
+	}
+	s.render(w, http.StatusOK, "message.html", struct {
+		Title   string
+		Message string
+	}{"Account ready", "Your password has been set. You can now sign in."})
+}
+
+type usersView struct {
+	Users      []auth.UserSummary
+	CurrentID  string
+	CSRFToken  string
+	SetupHours int
+}
+
+func (s *Server) usersPage(w http.ResponseWriter, r *http.Request) {
+	session := sessionFromContext(r.Context())
+	users, err := s.auth.ListUsers(r.Context(), session)
+	if err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	s.render(w, http.StatusOK, "users.html", usersView{
+		Users: users, CurrentID: session.User.ID, CSRFToken: session.CSRFToken,
+		SetupHours: int(auth.SetupTokenLifetime.Hours()),
+	})
+}
+
+func (s *Server) createUserWithSetup(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.validPrivilegedForm(w, r)
+	if !ok {
+		return
+	}
+	user, token, err := s.auth.CreateUserWithSetup(
+		r.Context(), session, r.PostForm.Get("username"), auth.Role(r.PostForm.Get("role")),
+	)
+	if err != nil {
+		s.renderUserManagementError(w, r, err, "User not created")
+		return
+	}
+	s.renderCreatedUser(w, user, s.setupURL(token))
+}
+
+func (s *Server) createUserWithPassword(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.validPrivilegedForm(w, r)
+	if !ok {
+		return
+	}
+	password := r.PostForm.Get("password")
+	if password != r.PostForm.Get("confirm_password") {
+		s.renderManagementMessage(w, http.StatusBadRequest, "Passwords do not match", "Enter the same password twice.")
+		return
+	}
+	user, err := s.auth.CreateUserWithPassword(
+		r.Context(), session, r.PostForm.Get("username"), password,
+		auth.Role(r.PostForm.Get("role")), s.passwordChecker,
+		auth.PasswordContext{Service: "wispdeck", Domain: s.config.AppOrigin.Hostname()},
+	)
+	if err != nil {
+		s.renderUserManagementError(w, r, err, "User not created")
+		return
+	}
+	s.renderCreatedUser(w, user, "")
+}
+
+func (s *Server) changeUserRole(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.validPrivilegedForm(w, r)
+	if !ok {
+		return
+	}
+	user, err := s.auth.SetUserRole(
+		r.Context(), session, r.PostForm.Get("user_id"), auth.Role(r.PostForm.Get("role")),
+	)
+	if err != nil {
+		s.renderUserManagementError(w, r, err, "Role not changed")
+		return
+	}
+	if user.ID == session.User.ID && user.Role != auth.RoleSuperuser {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings/users", http.StatusSeeOther)
+}
+
+func (s *Server) changeUserStatus(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.validPrivilegedForm(w, r)
+	if !ok {
+		return
+	}
+	user, err := s.auth.SetUserStatus(
+		r.Context(), session, r.PostForm.Get("user_id"), auth.UserStatus(r.PostForm.Get("status")),
+	)
+	if err != nil {
+		s.renderUserManagementError(w, r, err, "Status not changed")
+		return
+	}
+	if user.ID == session.User.ID && user.Status == auth.UserDisabled {
+		s.clearSessionCookie(w)
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/settings/users", http.StatusSeeOther)
+}
+
+func (s *Server) replaceUserSetupLink(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.validPrivilegedForm(w, r)
+	if !ok {
+		return
+	}
+	token, _, err := s.auth.ReplaceUserSetupToken(r.Context(), session, r.PostForm.Get("user_id"))
+	if err != nil {
+		s.renderUserManagementError(w, r, err, "Setup link not replaced")
+		return
+	}
+	s.render(w, http.StatusOK, "setup_link.html", struct {
+		SetupURL string
+	}{SetupURL: s.setupURL(token)})
+}
+
+func (s *Server) validPrivilegedForm(w http.ResponseWriter, r *http.Request) (auth.Session, bool) {
+	session := sessionFromContext(r.Context())
+	if !s.validBrowserOrigin(r) || !validCSRF(w, r, session.CSRFToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return auth.Session{}, false
+	}
+	return session, true
+}
+
+func (s *Server) renderCreatedUser(w http.ResponseWriter, user auth.User, setupURL string) {
+	s.render(w, http.StatusCreated, "user_created.html", struct {
+		Username string
+		Role     auth.Role
+		SetupURL string
+	}{Username: user.Username, Role: user.Role, SetupURL: setupURL})
+}
+
+func (s *Server) renderUserManagementError(w http.ResponseWriter, r *http.Request, err error, title string) {
+	message := "The requested user change could not be completed."
+	known := true
+	if errors.Is(err, auth.ErrLastSuperuser) {
+		message = "Wispdeck must retain at least one active superuser."
+	} else if errors.Is(err, auth.ErrInvalidUserState) {
+		message = "That user cannot make this transition."
+	} else if errors.Is(err, auth.ErrUserExists) {
+		message = "A user with that username already exists."
+	} else if errors.Is(err, auth.ErrCompromisedPassword) {
+		message = "Choose a password that has not appeared in common or breached-password lists."
+	} else if errors.Is(err, auth.ErrPasswordCheckFailed) {
+		message = "The breached-password check is temporarily unavailable. No user was created."
+	} else if errors.Is(err, auth.ErrPasswordTooShort) || errors.Is(err, auth.ErrPasswordTooLong) {
+		message = err.Error()
+	} else if errors.Is(err, auth.ErrPasswordInvalid) || errors.Is(err, auth.ErrInvalidUsername) || errors.Is(err, auth.ErrInvalidRole) {
+		message = err.Error()
+	} else {
+		known = false
+	}
+	if !known {
+		s.config.Logger.ErrorContext(r.Context(), "manage user", "title", title, "error", err)
+	}
+	s.renderManagementMessage(w, http.StatusBadRequest, title, message)
+}
+
+func (s *Server) renderManagementMessage(w http.ResponseWriter, status int, title, message string) {
+	s.render(w, status, "management_message.html", struct {
+		Title   string
+		Message string
+	}{title, message})
+}
+
+func (s *Server) setupURL(token string) string {
+	u := *s.config.AppOrigin
+	u.Path = "/setup"
+	u.RawQuery = url.Values{"token": {token}}.Encode()
+	return u.String()
 }
 
 func (s *Server) skipMFA(w http.ResponseWriter, r *http.Request) {
@@ -707,9 +988,35 @@ func (s *Server) revokeOtherSessions(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
 }
 
+func (s *Server) revokeSession(w http.ResponseWriter, r *http.Request) {
+	session := sessionFromContext(r.Context())
+	if !s.validBrowserOrigin(r) || !validCSRF(w, r, session.CSRFToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	encoded := r.PostForm.Get("session")
+	raw, err := hex.DecodeString(encoded)
+	if err != nil || len(raw) != sha256.Size {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
+	var digest [32]byte
+	copy(digest[:], raw)
+	if err := s.auth.RevokeSession(r.Context(), session, digest); err != nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if digest == session.TokenHash {
+		s.clearSessionCookie(w)
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
+}
+
 func (s *Server) passwordPage(w http.ResponseWriter, r *http.Request) {
 	session := sessionFromContext(r.Context())
-	if session.Assurance != auth.AssuranceMFA {
+	if session.Assurance == auth.AssuranceRecovery {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -739,19 +1046,13 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		auth.PasswordContext{
 			Username: session.User.Username,
 			Service:  "wispdeck",
-			Domain:   s.config.AdminOrigin.Hostname(),
+			Domain:   s.config.AppOrigin.Hostname(),
 		},
 	)
 	if err != nil {
-		message := "Password could not be changed."
+		message := passwordErrorMessage(err, "Password could not be changed.")
 		if errors.Is(err, auth.ErrPasswordMismatch) {
 			message = "Current password is incorrect."
-		} else if errors.Is(err, auth.ErrCompromisedPassword) {
-			message = "Choose a password that has not appeared in common or breached-password lists."
-		} else if errors.Is(err, auth.ErrPasswordCheckFailed) {
-			message = "The breached-password check is temporarily unavailable. No change was made."
-		} else if errors.Is(err, auth.ErrRecentMFARequired) {
-			message = "Sign in again before changing your password."
 		}
 		s.render(w, http.StatusBadRequest, "password.html", struct {
 			CSRFToken string
@@ -764,6 +1065,19 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		Title   string
 		Message string
 	}{"Password changed", "Every session was revoked. Sign in again with your new password."})
+}
+
+func passwordErrorMessage(err error, fallback string) string {
+	if errors.Is(err, auth.ErrCompromisedPassword) {
+		return "Choose a password that has not appeared in common or breached-password lists."
+	}
+	if errors.Is(err, auth.ErrPasswordCheckFailed) {
+		return "The breached-password check is temporarily unavailable. No change was made."
+	}
+	if errors.Is(err, auth.ErrPasswordTooShort) || errors.Is(err, auth.ErrPasswordTooLong) || errors.Is(err, auth.ErrPasswordInvalid) {
+		return err.Error()
+	}
+	return fallback
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -801,6 +1115,18 @@ func (s *Server) requireSession(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), sessionContextKey{}, session)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *Server) requireSuperuser(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		session := sessionFromContext(r.Context())
+		if session.User.Role != auth.RoleSuperuser ||
+			(session.Assurance != auth.AssurancePassword && session.Assurance != auth.AssuranceMFA) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -881,7 +1207,7 @@ func (s *Server) validBrowserOrigin(r *http.Request) bool {
 		}
 		origin = referer.Scheme + "://" + referer.Host
 	}
-	want := s.config.AdminOrigin.Scheme + "://" + s.config.AdminOrigin.Host
+	want := s.config.AppOrigin.Scheme + "://" + s.config.AppOrigin.Host
 	return subtle.ConstantTimeCompare([]byte(origin), []byte(want)) == 1
 }
 

@@ -1,0 +1,95 @@
+{{define "users.html"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Users — Wispdeck</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+</head>
+<body>
+  <main class="panel wide">
+    <h1>Users</h1>
+    <p class="subtle">Superusers can manage every Wispdeck user. MFA is not required for these actions.</p>
+
+    <section>
+      <h2>Create with a setup link</h2>
+      <p class="subtle">The link works once and expires after {{.SetupHours}} hours.</p>
+      <form action="/settings/users/create-setup" method="post">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label for="setup-username">Username</label>
+        <input id="setup-username" name="username" autocomplete="off" maxlength="64" required>
+        <label for="setup-role">Role</label>
+        <select id="setup-role" name="role">
+          <option value="user">User</option>
+          <option value="superuser">Superuser</option>
+        </select>
+        <button type="submit">Create user and setup link</button>
+      </form>
+    </section>
+
+    <details>
+      <summary>Create with a permanent password</summary>
+      <form action="/settings/users/create-password" method="post">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label for="password-username">Username</label>
+        <input id="password-username" name="username" autocomplete="off" maxlength="64" required>
+        <label for="password-role">Role</label>
+        <select id="password-role" name="role">
+          <option value="user">User</option>
+          <option value="superuser">Superuser</option>
+        </select>
+        <label for="assigned-password">Permanent password</label>
+        <input id="assigned-password" name="password" type="password" autocomplete="new-password" minlength="15" maxlength="1024" required>
+        <label for="assigned-password-confirmation">Confirm password</label>
+        <input id="assigned-password-confirmation" name="confirm_password" type="password" autocomplete="new-password" minlength="15" maxlength="1024" required>
+        <button type="submit">Create user with password</button>
+      </form>
+    </details>
+
+    <section>
+      <h2>Existing users</h2>
+      <ul class="records">
+        {{range .Users}}
+        <li>
+          <strong>{{.Username}}{{if eq .ID $.CurrentID}} · you{{end}}</strong>
+          <span class="subtle">{{.Role}} · {{.Status}} · {{.SessionCount}} active sessions{{if .MFASkipped}} · password only{{end}}</span>
+          <form action="/settings/users/role" method="post">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="user_id" value="{{.ID}}">
+            <label for="role-{{.ID}}">Role</label>
+            <select id="role-{{.ID}}" name="role">
+              <option value="user"{{if eq .Role "user"}} selected{{end}}>User</option>
+              <option value="superuser"{{if eq .Role "superuser"}} selected{{end}}>Superuser</option>
+            </select>
+            <button type="submit" class="secondary">Update role</button>
+          </form>
+          {{if eq .Status "active"}}
+          <form action="/settings/users/status" method="post">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="user_id" value="{{.ID}}">
+            <input type="hidden" name="status" value="disabled">
+            <button type="submit" class="danger">Disable user</button>
+          </form>
+          {{else if eq .Status "disabled"}}
+          <form action="/settings/users/status" method="post">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="user_id" value="{{.ID}}">
+            <input type="hidden" name="status" value="active">
+            <button type="submit" class="secondary">Enable user</button>
+          </form>
+          {{else if eq .Status "pending"}}
+          <form action="/settings/users/setup-link" method="post">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="user_id" value="{{.ID}}">
+            <button type="submit" class="secondary">Replace setup link</button>
+          </form>
+          {{end}}
+        </li>
+        {{end}}
+      </ul>
+    </section>
+
+    <p><a href="/">Return to Wispdeck</a></p>
+  </main>
+</body>
+</html>{{end}}
