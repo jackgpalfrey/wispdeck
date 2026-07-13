@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/wispdeck/wispdeck/internal/auth"
+	"github.com/wispdeck/wispdeck/internal/shortlink"
 	"github.com/wispdeck/wispdeck/internal/store"
 	"github.com/wispdeck/wispdeck/internal/web"
 	"golang.org/x/term"
@@ -129,6 +130,10 @@ func serve(args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	shortLinkService, err := shortlink.NewService(databaseStore)
+	if err != nil {
+		return err
+	}
 	passwordChecker := auth.PasswordChecker(auth.NewStaticPasswordChecker())
 	if !*offlinePasswordCheck {
 		passwordChecker = auth.NewCombinedPasswordChecker(passwordChecker, auth.NewPwnedPasswordChecker(nil))
@@ -139,7 +144,7 @@ func serve(args []string, logger *slog.Logger) error {
 		Logger:            logger,
 		PasswordChecker:   passwordChecker,
 		TrustedProxyCIDRs: trustedProxies,
-	}, authService, passkeyService, totpService)
+	}, authService, passkeyService, totpService, shortLinkService)
 	if err != nil {
 		return err
 	}

@@ -21,6 +21,7 @@ import (
 
 	"github.com/wispdeck/wispdeck/internal/auth"
 	"github.com/wispdeck/wispdeck/internal/limit"
+	"github.com/wispdeck/wispdeck/internal/shortlink"
 )
 
 const productionCookieName = "__Host-wispdeck_session"
@@ -44,6 +45,7 @@ type Server struct {
 	auth                     *auth.Service
 	passkeys                 *auth.PasskeyService
 	totp                     *auth.TOTPService
+	links                    *shortlink.Service
 	passwordChecker          auth.PasswordChecker
 	limiter                  *limit.LoginLimiter
 	templates                *template.Template
@@ -65,12 +67,13 @@ func New(
 	authService *auth.Service,
 	passkeyService *auth.PasskeyService,
 	totpService *auth.TOTPService,
+	shortLinkService *shortlink.Service,
 ) (*Server, error) {
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
-	if authService == nil || passkeyService == nil || totpService == nil {
-		return nil, errors.New("authentication, passkey, and TOTP services are required")
+	if authService == nil || passkeyService == nil || totpService == nil || shortLinkService == nil {
+		return nil, errors.New("authentication, passkey, TOTP, and short-link services are required")
 	}
 	if config.PasswordChecker == nil {
 		return nil, errors.New("password checker is required")
@@ -91,6 +94,7 @@ func New(
 		auth:                     authService,
 		passkeys:                 passkeyService,
 		totp:                     totpService,
+		links:                    shortLinkService,
 		passwordChecker:          config.PasswordChecker,
 		limiter:                  limit.NewLoginLimiter(),
 		templates:                templates,
@@ -140,6 +144,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/auth/passkey/login/finish", s.finishPasskeyLogin)
 	mux.Handle("GET /{$}", s.requireSession(http.HandlerFunc(s.dashboard)))
 	mux.Handle("POST /logout", s.requireSession(http.HandlerFunc(s.logout)))
+	mux.Handle("POST /links/create", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.createShortLink))))
+	mux.Handle("POST /links/target", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.updateShortLinkTarget))))
+	mux.Handle("POST /links/state", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.setShortLinkState))))
+	mux.Handle("POST /links/retire", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.retireShortLink))))
 	mux.Handle("GET /security/passkeys", s.requireSession(http.HandlerFunc(s.passkeySettings)))
 	mux.Handle("POST /security/mfa/skip", s.requireSession(http.HandlerFunc(s.skipMFA)))
 	mux.Handle("POST /api/auth/passkey/register/begin", s.requireSession(http.HandlerFunc(s.beginPasskeyRegistration)))
@@ -160,6 +168,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /settings/users/role", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.changeUserRole))))
 	mux.Handle("POST /settings/users/status", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.changeUserStatus))))
 	mux.Handle("POST /settings/users/setup-link", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.replaceUserSetupLink))))
+	mux.HandleFunc("GET /{slug}", s.resolveShortLink)
 	return s.securityBoundary(mux)
 }
 
@@ -271,12 +280,211 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
 		return
 	}
-	s.render(w, http.StatusOK, "dashboard.html", struct {
-		Username  string
-		CSRFToken string
-		Assurance auth.Assurance
-		Role      auth.Role
-	}{Username: session.User.Username, CSRFToken: session.CSRFToken, Assurance: session.Assurance, Role: session.User.Role})
+	s.renderDashboard(w, r, http.StatusOK, shortLinkForm{})
+}
+
+type shortLinkForm struct {
+	Slug      string
+	TargetURL string
+	Error     string
+}
+
+type shortLinkView struct {
+	ID            string
+	OwnerUsername string
+	Slug          string
+	TargetURL     string
+	PublicURL     string
+	Enabled       bool
+	VisitCount    int64
+	CreatedAt     string
+	LastVisitedAt string
+}
+
+type dashboardView struct {
+	Username   string
+	CSRFToken  string
+	Assurance  auth.Assurance
+	Role       auth.Role
+	ShowOwners bool
+	Create     shortLinkForm
+	Links      []shortLinkView
+}
+
+func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status int, form shortLinkForm) {
+	session := sessionFromContext(r.Context())
+	links, err := s.links.List(r.Context(), shortLinkActor(session))
+	if err != nil {
+		s.config.Logger.ErrorContext(r.Context(), "list short links", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	views := make([]shortLinkView, 0, len(links))
+	for _, link := range links {
+		lastVisited := "Never"
+		if !link.LastVisitedAt.IsZero() {
+			lastVisited = link.LastVisitedAt.Format("2006-01-02 15:04 UTC")
+		}
+		views = append(views, shortLinkView{
+			ID: link.ID, OwnerUsername: link.OwnerUsername, Slug: link.Slug,
+			TargetURL: link.TargetURL, PublicURL: s.shortLinkURL(link.Slug),
+			Enabled: link.Enabled, VisitCount: link.VisitCount,
+			CreatedAt: link.CreatedAt.Format("2006-01-02 15:04 UTC"), LastVisitedAt: lastVisited,
+		})
+	}
+	s.render(w, status, "dashboard.html", dashboardView{
+		Username: session.User.Username, CSRFToken: session.CSRFToken,
+		Assurance: session.Assurance, Role: session.User.Role,
+		ShowOwners: session.User.Role == auth.RoleSuperuser,
+		Create:     form, Links: views,
+	})
+}
+
+func (s *Server) createShortLink(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.validShortLinkForm(w, r)
+	if !ok {
+		return
+	}
+	form := shortLinkForm{Slug: r.PostForm.Get("slug"), TargetURL: r.PostForm.Get("target_url")}
+	_, err := s.links.Create(r.Context(), shortLinkActor(session), form.Slug, form.TargetURL)
+	if err != nil {
+		if errors.Is(err, shortlink.ErrForbidden) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if message, known := shortLinkErrorMessage(err); known {
+			form.Error = message
+			status := http.StatusBadRequest
+			if errors.Is(err, shortlink.ErrSlugUnavailable) {
+				status = http.StatusConflict
+			}
+			s.renderDashboard(w, r, status, form)
+			return
+		}
+		s.config.Logger.ErrorContext(r.Context(), "create short link", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) updateShortLinkTarget(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.validShortLinkForm(w, r)
+	if !ok {
+		return
+	}
+	err := s.links.UpdateTarget(
+		r.Context(), shortLinkActor(session), r.PostForm.Get("link_id"), r.PostForm.Get("target_url"),
+	)
+	if err != nil {
+		s.renderShortLinkError(w, r, err, "Destination not changed")
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) setShortLinkState(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.validShortLinkForm(w, r)
+	if !ok {
+		return
+	}
+	var enabled bool
+	switch r.PostForm.Get("enabled") {
+	case "true":
+		enabled = true
+	case "false":
+		enabled = false
+	default:
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if err := s.links.SetEnabled(r.Context(), shortLinkActor(session), r.PostForm.Get("link_id"), enabled); err != nil {
+		s.renderShortLinkError(w, r, err, "Link state not changed")
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) retireShortLink(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.validShortLinkForm(w, r)
+	if !ok {
+		return
+	}
+	if r.PostForm.Get("confirm") != "yes" {
+		http.Error(w, "retirement must be confirmed", http.StatusBadRequest)
+		return
+	}
+	if err := s.links.Retire(r.Context(), shortLinkActor(session), r.PostForm.Get("link_id")); err != nil {
+		s.renderShortLinkError(w, r, err, "Link not retired")
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) validShortLinkForm(w http.ResponseWriter, r *http.Request) (auth.Session, bool) {
+	session := sessionFromContext(r.Context())
+	if !s.validBrowserOrigin(r) || !validCSRF(w, r, session.CSRFToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return auth.Session{}, false
+	}
+	return session, true
+}
+
+func (s *Server) renderShortLinkError(w http.ResponseWriter, r *http.Request, err error, title string) {
+	message, known := shortLinkErrorMessage(err)
+	status := http.StatusBadRequest
+	if errors.Is(err, shortlink.ErrNotFound) || errors.Is(err, shortlink.ErrForbidden) {
+		message = "That short link does not exist or you are not allowed to manage it."
+		known = true
+		status = http.StatusNotFound
+	}
+	if !known {
+		s.config.Logger.ErrorContext(r.Context(), "manage short link", "title", title, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	s.render(w, status, "shortlink_message.html", struct {
+		Title   string
+		Message string
+	}{Title: title, Message: message})
+}
+
+func shortLinkErrorMessage(err error) (string, bool) {
+	for _, known := range []error{
+		shortlink.ErrInvalidSlug, shortlink.ErrReservedSlug, shortlink.ErrSlugUnavailable,
+		shortlink.ErrInvalidTarget, shortlink.ErrTargetTooLong,
+	} {
+		if errors.Is(err, known) {
+			return known.Error(), true
+		}
+	}
+	return "", false
+}
+
+func (s *Server) resolveShortLink(w http.ResponseWriter, r *http.Request) {
+	link, err := s.links.Resolve(r.Context(), r.PathValue("slug"))
+	if errors.Is(err, shortlink.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		s.config.Logger.ErrorContext(r.Context(), "resolve short link", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, link.TargetURL, http.StatusFound)
+}
+
+func shortLinkActor(session auth.Session) shortlink.Actor {
+	return shortlink.Actor{
+		UserID: session.User.ID, Superuser: session.User.Role == auth.RoleSuperuser,
+	}
+}
+
+func (s *Server) shortLinkURL(slug string) string {
+	u := *s.config.AppOrigin
+	u.Path = "/" + slug
+	return u.String()
 }
 
 type userSetupView struct {
@@ -1123,6 +1331,17 @@ func (s *Server) requireSuperuser(next http.Handler) http.Handler {
 		session := sessionFromContext(r.Context())
 		if session.User.Role != auth.RoleSuperuser ||
 			(session.Assurance != auth.AssurancePassword && session.Assurance != auth.AssuranceMFA) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) requireManagedSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		session := sessionFromContext(r.Context())
+		if session.Assurance != auth.AssurancePassword && session.Assurance != auth.AssuranceMFA {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

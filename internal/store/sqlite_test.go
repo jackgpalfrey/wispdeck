@@ -161,6 +161,9 @@ func TestMigrationsInvalidatePasswordOnlySessionsAndReachCurrentSchema(t *testin
 	if err := database.db.QueryRow(`SELECT count(*) FROM totp_credentials`).Scan(&count); err != nil {
 		t.Fatalf("schema v3 table missing: %v", err)
 	}
+	if err := database.db.QueryRow(`SELECT count(*) FROM short_links`).Scan(&count); err != nil {
+		t.Fatalf("schema v6 table missing: %v", err)
+	}
 	if err := database.db.QueryRow(`SELECT version FROM schema_version`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}

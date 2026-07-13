@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
@@ -51,6 +51,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err := migrationFive(ctx, tx); err != nil {
 				return err
 			}
+		case 6:
+			if err := migrationSix(ctx, tx); err != nil {
+				return err
+			}
 		}
 		version++
 		if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
@@ -62,6 +66,37 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrationSix(ctx context.Context, tx *sql.Tx) error {
+	const schema = `
+		CREATE TABLE short_links (
+			id TEXT PRIMARY KEY CHECK(length(id) = 32),
+			owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			slug TEXT NOT NULL COLLATE NOCASE UNIQUE
+				CHECK(length(slug) BETWEEN 1 AND 48)
+				CHECK(slug = lower(slug))
+				CHECK(slug NOT GLOB '*[^a-z0-9-]*')
+				CHECK(substr(slug, 1, 1) <> '-' AND substr(slug, -1, 1) <> '-'),
+			target_url TEXT NOT NULL CHECK(length(target_url) BETWEEN 1 AND 4096),
+			enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+			visit_count INTEGER NOT NULL DEFAULT 0 CHECK(visit_count >= 0),
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			last_visited_at INTEGER,
+			deleted_at INTEGER,
+			CHECK(created_at <= updated_at),
+			CHECK(last_visited_at IS NULL OR created_at <= last_visited_at),
+			CHECK(deleted_at IS NULL OR (created_at <= deleted_at AND enabled = 0))
+		) STRICT;
+		CREATE INDEX short_links_owner_created
+			ON short_links(owner_user_id, created_at DESC, id)
+			WHERE deleted_at IS NULL;
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 6: %w", err)
 	}
 	return nil
 }

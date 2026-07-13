@@ -7,16 +7,86 @@
   <link rel="stylesheet" href="/assets/admin.css">
 </head>
 <body>
-  <main class="panel">
-    <h1>Wispdeck</h1>
-    <p>Signed in as <strong>{{.Username}}</strong>.</p>
+  <main class="panel wide">
+    <header class="page-header">
+      <div>
+        <h1>Wispdeck</h1>
+        <p class="subtle">Signed in as <strong>{{.Username}}</strong>.</p>
+      </div>
+      <nav>
+        <a href="/security/passkeys">Account and security</a>
+        {{if eq .Role "superuser"}}<a href="/settings/users">Users</a>{{end}}
+      </nav>
+    </header>
+
     {{if eq .Assurance "password"}}
       <p class="notice">MFA is not enabled. This account is protected only by its password. <a href="/security/passkeys">Set up MFA</a>.</p>
     {{end}}
-    <p class="subtle">Links, sites, and data will live here.</p>
-    <p><a href="/security/passkeys">Account and security</a></p>
-    {{if eq .Role "superuser"}}<p><a href="/settings/users">Manage users</a></p>{{end}}
-    <form action="/logout" method="post">
+
+    <section>
+      <h2>Create a short link</h2>
+      <form action="/links/create" method="post">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        {{if .Create.Error}}<p class="error">{{.Create.Error}}</p>{{end}}
+        <label for="target-url">Destination URL</label>
+        <input id="target-url" name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" placeholder="https://example.com/a/long/path" value="{{.Create.TargetURL}}" required>
+        <label for="slug">Short name <span class="subtle">— optional</span></label>
+        <input id="slug" name="slug" autocomplete="off" minlength="1" maxlength="48" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?" placeholder="Generated automatically" value="{{.Create.Slug}}">
+        <button type="submit">Create short link</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>{{if .ShowOwners}}All short links{{else}}Your short links{{end}}</h2>
+      {{if .Links}}
+      <ul class="records links">
+        {{range .Links}}
+        <li>
+          <div class="record-heading">
+            <strong><a href="{{.PublicURL}}" rel="noreferrer">/{{.Slug}}</a></strong>
+            {{if .Enabled}}<span class="status enabled">Active</span>{{else}}<span class="status disabled">Disabled</span>{{end}}
+          </div>
+          <a class="target" href="{{.TargetURL}}" rel="noreferrer">{{.TargetURL}}</a>
+          <span class="subtle">{{if $.ShowOwners}}Owned by {{.OwnerUsername}} · {{end}}{{.VisitCount}} redirect{{if ne .VisitCount 1}}s{{end}} · created {{.CreatedAt}} · last used {{.LastVisitedAt}}</span>
+
+          <details>
+            <summary>Manage</summary>
+            <form action="/links/target" method="post">
+              <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+              <input type="hidden" name="link_id" value="{{.ID}}">
+              <label for="target-{{.ID}}">Destination URL</label>
+              <input id="target-{{.ID}}" name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" value="{{.TargetURL}}" required>
+              <button type="submit" class="secondary">Update destination</button>
+            </form>
+            <div class="actions">
+              <form action="/links/state" method="post">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <input type="hidden" name="link_id" value="{{.ID}}">
+                {{if .Enabled}}
+                  <input type="hidden" name="enabled" value="false">
+                  <button type="submit" class="secondary">Disable</button>
+                {{else}}
+                  <input type="hidden" name="enabled" value="true">
+                  <button type="submit" class="secondary">Enable</button>
+                {{end}}
+              </form>
+              <form action="/links/retire" method="post" class="retire-form">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <input type="hidden" name="link_id" value="{{.ID}}">
+                <label class="confirmation"><input type="checkbox" name="confirm" value="yes" required> Retire this name permanently</label>
+                <button type="submit" class="danger">Retire link</button>
+              </form>
+            </div>
+          </details>
+        </li>
+        {{end}}
+      </ul>
+      {{else}}
+        <p class="subtle">No short links yet.</p>
+      {{end}}
+    </section>
+
+    <form action="/logout" method="post" class="sign-out">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
       <button type="submit" class="secondary">Sign out</button>
     </form>

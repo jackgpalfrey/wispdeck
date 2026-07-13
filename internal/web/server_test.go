@@ -20,6 +20,7 @@ import (
 	webauthnlib "github.com/go-webauthn/webauthn/webauthn"
 	totplib "github.com/pquerna/otp/totp"
 	"github.com/wispdeck/wispdeck/internal/auth"
+	"github.com/wispdeck/wispdeck/internal/shortlink"
 	"github.com/wispdeck/wispdeck/internal/store"
 )
 
@@ -72,12 +73,16 @@ func newTestServer(t *testing.T, production bool) testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	shortLinkService, err := shortlink.NewService(database)
+	if err != nil {
+		t.Fatal(err)
+	}
 	server, err := New(Config{
 		AppOrigin:       origin,
 		Development:     !production,
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		PasswordChecker: auth.NewStaticPasswordChecker(),
-	}, authService, passkeyService, totpService)
+	}, authService, passkeyService, totpService, shortLinkService)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,6 +203,219 @@ func TestLoginRequiresOriginAndSetsHardenedCookie(t *testing.T) {
 	cookie := cookies[0]
 	if cookie.Name != productionCookieName || !cookie.Secure || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode || cookie.Domain != "" || cookie.Path != "/" {
 		t.Fatalf("session cookie = %#v", cookie)
+	}
+}
+
+func TestShortLinkCreateResolveAndDisable(t *testing.T) {
+	server := newTestServer(t, false)
+	cookie, session := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+
+	create := request(http.MethodPost, "http://admin.example.test/links/create", url.Values{
+		"csrf_token": {session.CSRFToken},
+		"slug":       {"Release-Notes"},
+		"target_url": {"https://example.com/releases/v1?from=wispdeck"},
+	})
+	create.Header.Set("Origin", "http://admin.example.test")
+	create.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, create)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatalf("create short link = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+
+	resolve := request(http.MethodGet, "http://admin.example.test/RELEASE-NOTES", nil)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, resolve)
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "https://example.com/releases/v1?from=wispdeck" {
+		t.Fatalf("resolve short link = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+
+	dashboard := request(http.MethodGet, "http://admin.example.test/", nil)
+	dashboard.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, dashboard)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/release-notes") || !strings.Contains(w.Body.String(), "1 redirect") {
+		t.Fatalf("short-link dashboard = (%d, %q)", w.Code, w.Body.String())
+	}
+	links, err := server.database.ShortLinks(context.Background(), session.User.ID, false)
+	if err != nil || len(links) != 1 {
+		t.Fatalf("stored short links = (%#v, %v)", links, err)
+	}
+
+	disable := request(http.MethodPost, "http://admin.example.test/links/state", url.Values{
+		"csrf_token": {session.CSRFToken}, "link_id": {links[0].ID}, "enabled": {"false"},
+	})
+	disable.Header.Set("Origin", "http://admin.example.test")
+	disable.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, disable)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("disable short link = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	resolve = request(http.MethodGet, "http://admin.example.test/release-notes", nil)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, resolve)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("disabled short link status = %d", w.Code)
+	}
+
+	retireWithoutConfirmation := request(http.MethodPost, "http://admin.example.test/links/retire", url.Values{
+		"csrf_token": {session.CSRFToken}, "link_id": {links[0].ID},
+	})
+	retireWithoutConfirmation.Header.Set("Origin", "http://admin.example.test")
+	retireWithoutConfirmation.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, retireWithoutConfirmation)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("unconfirmed retirement status = %d", w.Code)
+	}
+
+	retire := request(http.MethodPost, "http://admin.example.test/links/retire", url.Values{
+		"csrf_token": {session.CSRFToken}, "link_id": {links[0].ID}, "confirm": {"yes"},
+	})
+	retire.Header.Set("Origin", "http://admin.example.test")
+	retire.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, retire)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("retire short link = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	reclaim := request(http.MethodPost, "http://admin.example.test/links/create", url.Values{
+		"csrf_token": {session.CSRFToken}, "slug": {"release-notes"}, "target_url": {"https://replacement.example"},
+	})
+	reclaim.Header.Set("Origin", "http://admin.example.test")
+	reclaim.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, reclaim)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("retired-name reclaim status = %d, body = %q", w.Code, w.Body.String())
+	}
+}
+
+func TestShortLinkFormsValidateOriginSlugAndTarget(t *testing.T) {
+	server := newTestServer(t, false)
+	cookie, session := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+
+	tests := []struct {
+		name   string
+		values url.Values
+		origin string
+		status int
+		body   string
+	}{
+		{
+			name: "missing origin",
+			values: url.Values{
+				"csrf_token": {session.CSRFToken}, "slug": {"valid"}, "target_url": {"https://example.com"},
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name: "reserved slug",
+			values: url.Values{
+				"csrf_token": {session.CSRFToken}, "slug": {"login"}, "target_url": {"https://example.com"},
+			},
+			origin: "http://admin.example.test", status: http.StatusBadRequest, body: "reserved by Wispdeck",
+		},
+		{
+			name: "unsafe target",
+			values: url.Values{
+				"csrf_token": {session.CSRFToken}, "slug": {"unsafe"}, "target_url": {"javascript:alert(1)"},
+			},
+			origin: "http://admin.example.test", status: http.StatusBadRequest, body: "absolute HTTP or HTTPS URL",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r := request(http.MethodPost, "http://admin.example.test/links/create", test.values)
+			if test.origin != "" {
+				r.Header.Set("Origin", test.origin)
+			}
+			r.AddCookie(cookie)
+			w := httptest.NewRecorder()
+			server.handler.ServeHTTP(w, r)
+			if w.Code != test.status || (test.body != "" && !strings.Contains(w.Body.String(), test.body)) {
+				t.Fatalf("response = (%d, %q)", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestShortLinkOwnershipAndSuperuserManagement(t *testing.T) {
+	server := newTestServer(t, false)
+	ctx := context.Background()
+	passwords, err := auth.NewPasswordManager(server.keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobHash, err := passwords.Hash("bob correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := server.database.CreateManagedUser(ctx, "bob", bobHash, auth.RoleUser, auth.UserActive, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, err := server.database.UserByUsername(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceLink, err := server.database.CreateShortLink(ctx, alice.ID, "alice-link", "https://alice.example", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobLink, err := server.database.CreateShortLink(ctx, bob.ID, "bob-link", "https://bob.example", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bobCookie, bobSession := passwordOnlyLogin(t, server, "bob", "bob correct horse battery staple")
+	bobDashboard := request(http.MethodGet, "http://admin.example.test/", nil)
+	bobDashboard.AddCookie(bobCookie)
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, bobDashboard)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/bob-link") || strings.Contains(w.Body.String(), "/alice-link") {
+		t.Fatalf("Bob dashboard = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	crossOwnerUpdate := request(http.MethodPost, "http://admin.example.test/links/target", url.Values{
+		"csrf_token": {bobSession.CSRFToken}, "link_id": {aliceLink.ID}, "target_url": {"https://changed.example"},
+	})
+	crossOwnerUpdate.Header.Set("Origin", "http://admin.example.test")
+	crossOwnerUpdate.AddCookie(bobCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, crossOwnerUpdate)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner update status = %d, body = %q", w.Code, w.Body.String())
+	}
+
+	aliceCookie, aliceSession := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+	aliceDashboard := request(http.MethodGet, "http://admin.example.test/", nil)
+	aliceDashboard.AddCookie(aliceCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, aliceDashboard)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Owned by bob") || !strings.Contains(w.Body.String(), "/alice-link") {
+		t.Fatalf("superuser dashboard = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	disableBob := request(http.MethodPost, "http://admin.example.test/links/state", url.Values{
+		"csrf_token": {aliceSession.CSRFToken}, "link_id": {bobLink.ID}, "enabled": {"false"},
+	})
+	disableBob.Header.Set("Origin", "http://admin.example.test")
+	disableBob.AddCookie(aliceCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, disableBob)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("superuser disable status = %d, body = %q", w.Code, w.Body.String())
+	}
+
+	resolveBob := request(http.MethodGet, "http://admin.example.test/bob-link", nil)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, resolveBob)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("superuser-disabled link status = %d", w.Code)
 	}
 }
 

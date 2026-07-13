@@ -3,12 +3,18 @@
 Wispdeck is a self-hosted home for links and lightweight websites that wake on
 demand.
 
-The project is at the beginning of its implementation. Its first implemented
-slice is the production application authentication boundary, including local
-user and superuser management. See
+The implemented control plane includes production-oriented local authentication,
+user and superuser management, and owner-scoped short links. Users can choose a
+custom short name or generate one, update destinations, disable links, and see
+redirect counts. Superusers can manage every user's links. See
 [`docs/security-model.md`](docs/security-model.md) and
 [`docs/authentication.md`](docs/authentication.md) for the contracts that shape
 it.
+
+Short links use editable `302 Found` redirects. Names are deployment-wide,
+case-insensitive, and permanently reserved once created so an old shared URL
+cannot later be claimed by someone else. Only absolute HTTP and HTTPS
+destinations are accepted.
 
 ## Development
 

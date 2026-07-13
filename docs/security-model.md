@@ -25,6 +25,24 @@ other users; the final active superuser is protected by a transactional
 database invariant. User status and role changes apply to existing sessions
 immediately.
 
+## Short links
+
+Short-link names are globally unique within a deployment and contain only
+lowercase ASCII letters, numbers, and hyphens. Wispdeck reserves its application
+route names before they can become public redirects. Destinations must be
+absolute HTTP or HTTPS URLs, may not contain embedded credentials, and are
+validated again during resolution so corrupted storage cannot inject an unsafe
+`Location` header.
+
+Users can list and mutate only their own links. Superusers can list and mutate
+all links. Ownership predicates are part of the same SQL statement as each
+mutation, rather than a separate check vulnerable to a time-of-check/time-of-use
+race. All unsafe requests retain the application origin and CSRF requirements.
+Disabled, retired, unknown, and invalid links share the same public `404`
+response. Retiring a link preserves its name as a tombstone, preventing an old
+shared URL from being claimed by another user. Redirect resolution atomically
+increments a count and records the most recent use.
+
 ## Passwords and bootstrap
 
 - The initial superuser is created locally with `wispdeck admin create`.
