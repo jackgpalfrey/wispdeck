@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A tiny static site for testing Wispdeck hosting.">
+  <title>Hello from Wispdeck</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <nav aria-label="Main navigation">
+      <a class="wordmark" href="/">Wispdeck demo</a>
+      <a href="/about/">About this bundle</a>
+    </nav>
+
+    <section class="hero">
+      <p class="eyebrow">Static, isolated, awake on demand</p>
+      <h1>Your first little site is alive.</h1>
+      <p class="lede">
+        This page, its styling, and its JavaScript were all served from an
+        immutable Wispdeck release.
+      </p>
+      <div class="actions">
+        <button id="celebrate" type="button">Test the JavaScript</button>
+        <a class="secondary" href="/about/">Try a nested page</a>
+      </div>
+      <p id="status" class="status" aria-live="polite">Waiting for a click.</p>
+    </section>
+
+    <section class="facts" aria-label="Hosting features">
+      <article>
+        <span>01</span>
+        <h2>Draft first</h2>
+        <p>Uploads remain private until you explicitly publish them.</p>
+      </article>
+      <article>
+        <span>02</span>
+        <h2>Atomic releases</h2>
+        <p>Visitors receive one complete version, never half an upload.</p>
+      </article>
+      <article>
+        <span>03</span>
+        <h2>No idle runtime</h2>
+        <p>There is no dedicated process waiting around for this site.</p>
+      </article>
+    </section>
+  </main>
+
+  <div class="orb orb-one" aria-hidden="true"></div>
+  <div class="orb orb-two" aria-hidden="true"></div>
+</body>
+</html>
