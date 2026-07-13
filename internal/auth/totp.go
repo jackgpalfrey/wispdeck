@@ -159,7 +159,7 @@ func (s *TOTPService) ConfirmEnrollment(
 	var codes []string
 	var records []RecoveryCodeRecord
 	var batchID string
-	if session.Assurance == AssuranceBootstrap || session.Assurance == AssuranceRecovery {
+	if session.Assurance == AssuranceBootstrap || session.Assurance == AssurancePassword || session.Assurance == AssuranceRecovery {
 		codes, records, batchID, err = newRecoveryCodeBatch(s.keys, session.User.ID, s.now().UTC())
 		if err != nil {
 			return nil, err
@@ -326,7 +326,7 @@ func decodeTOTPSecret(secret string) ([]byte, error) {
 }
 
 func requireRecentFactorSession(session Session, now time.Time) error {
-	if session.Assurance != AssuranceBootstrap && session.Assurance != AssuranceRecovery && session.Assurance != AssuranceMFA {
+	if session.Assurance != AssuranceBootstrap && session.Assurance != AssurancePassword && session.Assurance != AssuranceRecovery && session.Assurance != AssuranceMFA {
 		return ErrPasskeyRequired
 	}
 	if now.Sub(session.AuthenticatedAt) > recentAuthentication {

@@ -38,6 +38,7 @@ type PasskeyRepository interface {
 	PasskeysByUser(context.Context, string, string) ([]PasskeyRecord, error)
 	PasskeyCount(context.Context, string, string) (int, error)
 	TOTPConfigured(context.Context, string) (bool, error)
+	SkipMFA(context.Context, string, string, [32]byte, time.Time) error
 	UpdatePasskey(context.Context, PasskeyRecord, time.Time) error
 	CompletePasskeyRegistration(context.Context, PasskeyRecord, string, []RecoveryCodeRecord, [32]byte, time.Time) error
 	DeletePasskeyKeepingOne(context.Context, string, string, string) error
@@ -113,6 +114,24 @@ func (s *PasskeyService) RecentMFA(session Session) bool {
 	return session.Assurance == AssuranceMFA && s.now().UTC().Sub(session.AuthenticatedAt) <= recentAuthentication
 }
 
+// SkipMFA records an explicit password-only choice for an account that has no
+// enrolled factor. The repository changes the account preference and current
+// bootstrap session atomically so a partially applied opt-out cannot grant
+// access.
+func (s *PasskeyService) SkipMFA(ctx context.Context, session Session) error {
+	if session.Assurance != AssuranceBootstrap {
+		return ErrRecentMFARequired
+	}
+	if err := s.repository.SkipMFA(ctx, session.User.ID, s.rpID, session.TokenHash, s.now().UTC()); err != nil {
+		return fmt.Errorf("skip MFA: %w", err)
+	}
+	_ = s.repository.RecordAuthEvent(ctx, AuthEvent{
+		OccurredAt: s.now().UTC(), Kind: "mfa_skipped", Username: session.User.Username,
+		UserID: session.User.ID, ClientIP: session.ClientIP,
+	})
+	return nil
+}
+
 func NewPasskeyService(
 	repository PasskeyRepository,
 	authService *Service,
@@ -171,7 +190,11 @@ func (s *PasskeyService) AfterPassword(
 		return "", Session{}, false, fmt.Errorf("check TOTP configuration: %w", err)
 	}
 	if count == 0 && !hasTOTP {
-		token, session, err = s.auth.NewSession(ctx, user, AssuranceBootstrap, clientIP, userAgent)
+		assurance := AssuranceBootstrap
+		if user.MFASkipped {
+			assurance = AssurancePassword
+		}
+		token, session, err = s.auth.NewSession(ctx, user, assurance, clientIP, userAgent)
 		return token, session, false, err
 	}
 	token, err = NewToken()
@@ -372,7 +395,7 @@ func (s *PasskeyService) FinishRegistration(
 	var codes []string
 	var batchID string
 	var recoveryRecords []RecoveryCodeRecord
-	if session.Assurance == AssuranceBootstrap || session.Assurance == AssuranceRecovery {
+	if session.Assurance == AssuranceBootstrap || session.Assurance == AssurancePassword || session.Assurance == AssuranceRecovery {
 		codes, recoveryRecords, batchID, err = s.newRecoveryCodes(user.ID)
 		if err != nil {
 			return nil, err

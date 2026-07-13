@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
@@ -43,6 +43,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err := migrationThree(ctx, tx); err != nil {
 				return err
 			}
+		case 4:
+			if err := migrationFour(ctx, tx); err != nil {
+				return err
+			}
 		}
 		version++
 		if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
@@ -54,6 +58,43 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrationFour(ctx context.Context, tx *sql.Tx) error {
+	const schema = `
+		ALTER TABLE users ADD COLUMN mfa_skipped INTEGER NOT NULL DEFAULT 0
+			CHECK(mfa_skipped IN (0, 1));
+
+		CREATE TABLE sessions_v4 (
+			token_hash BLOB PRIMARY KEY CHECK(length(token_hash) = 32),
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			csrf_token TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			last_seen INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			assurance TEXT NOT NULL CHECK(assurance IN ('bootstrap', 'password', 'mfa', 'recovery')),
+			authenticated_at INTEGER NOT NULL,
+			client_ip TEXT NOT NULL,
+			user_agent TEXT NOT NULL,
+			CHECK(created_at <= last_seen),
+			CHECK(last_seen <= expires_at)
+		) STRICT;
+		INSERT INTO sessions_v4 (
+			token_hash, user_id, csrf_token, created_at, last_seen, expires_at,
+			assurance, authenticated_at, client_ip, user_agent
+		)
+		SELECT token_hash, user_id, csrf_token, created_at, last_seen, expires_at,
+			assurance, authenticated_at, client_ip, user_agent
+		FROM sessions;
+		DROP TABLE sessions;
+		ALTER TABLE sessions_v4 RENAME TO sessions;
+		CREATE INDEX sessions_user_id ON sessions(user_id);
+		CREATE INDEX sessions_expires_at ON sessions(expires_at);
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 4: %w", err)
 	}
 	return nil
 }

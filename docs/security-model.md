@@ -37,12 +37,15 @@ administrative control; roles require a separate authorization design.
   reduce account-enumeration timing differences.
 
 Password authentication is followed by a mandatory second factor once either a
-passkey or authenticator app has been enrolled. User-verifying WebAuthn is
-preferred because it is phishing resistant. RFC 6238 TOTP is available as a
+passkey or authenticator app has been enrolled. Before enrollment, an operator
+may explicitly choose password-only administration; this choice is persisted,
+audited, and prominently warned about in the interface. User-verifying WebAuthn
+is preferred because it is phishing resistant. RFC 6238 TOTP is available as a
 more broadly compatible alternative; its encrypted seed, single-use counters,
-clock window, and rate limits are defined in `authentication.md`. Password-only
-bootstrap and recovery sessions are capability-restricted and cannot administer
-Wispdeck.
+clock window, and rate limits are defined in `authentication.md`. Bootstrap
+and recovery sessions are capability-restricted and cannot administer
+Wispdeck. A deliberately opted-out password-only session can perform normal
+administration, but not operations that require recent MFA.
 
 ## Sessions
 

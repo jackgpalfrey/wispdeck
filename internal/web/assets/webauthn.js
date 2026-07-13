@@ -76,22 +76,76 @@ function showError(error) {
 }
 
 const loginButton = document.querySelector("[data-passkey-login]");
+const anotherFactorButton = document.querySelector("[data-use-another-factor]");
+let loginAbortController = null;
+
+function focusFallbackFactor() {
+  const totpInput = document.querySelector("#totp-code");
+  if (totpInput) {
+    totpInput.focus();
+    totpInput.select();
+    return;
+  }
+  const recoverySummary = document.querySelector("details summary");
+  if (recoverySummary) {
+    const recoveryDetails = recoverySummary.parentElement;
+    if (recoveryDetails && !recoveryDetails.open) {
+      recoveryDetails.open = true;
+    }
+    const recoveryInput = document.querySelector("#recovery-code");
+    if (recoveryInput) {
+      recoveryInput.focus();
+      recoveryInput.select();
+      return;
+    }
+    recoverySummary.focus();
+  }
+}
+
 if (loginButton) {
   loginButton.addEventListener("click", async () => {
     loginButton.disabled = true;
+    if (anotherFactorButton) anotherFactorButton.disabled = false;
+    loginAbortController = typeof AbortController === "function" ? new AbortController() : null;
     try {
       if (!window.PublicKeyCredential) throw new Error("This browser does not support passkeys.");
       const options = await jsonRequest("/api/auth/passkey/login/begin");
-      const credential = await navigator.credentials.get({publicKey: requestOptions(options)});
+      const publicKeyRequest = {publicKey: requestOptions(options)};
+      if (loginAbortController) publicKeyRequest.signal = loginAbortController.signal;
+      const credential = await navigator.credentials.get(publicKeyRequest);
       const result = await jsonRequest("/api/auth/passkey/login/finish", {
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(credentialJSON(credential)),
       });
       window.location.assign(result.redirect);
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        loginButton.disabled = false;
+        return;
+      }
       showError(error);
       loginButton.disabled = false;
+      if (anotherFactorButton) anotherFactorButton.disabled = false;
+    } finally {
+      loginAbortController = null;
     }
+  });
+}
+
+if (anotherFactorButton) {
+  anotherFactorButton.addEventListener("click", () => {
+    if (loginAbortController) {
+      loginAbortController.abort();
+    }
+    if (loginButton) {
+      loginButton.disabled = false;
+    }
+    const status = document.querySelector("#passkey-status");
+    if (status) {
+      status.classList.add("hidden");
+      status.textContent = "";
+    }
+    focusFallbackFactor();
   });
 }
 
@@ -143,4 +197,3 @@ if (copyButton) {
     copyButton.textContent = "Copied";
   });
 }
-

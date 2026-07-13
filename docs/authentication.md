@@ -9,21 +9,30 @@ tested.
 
 ## Factors and assurance
 
-An administrative session has one of three assurance states:
+An administrative session has one of four assurance states:
 
 - `bootstrap`: password verified, but the account has no second factor yet.
-  This session may only enroll the first passkey or TOTP authenticator and sign
-  out.
+  This session may enroll the first passkey or TOTP authenticator, explicitly
+  opt into password-only access, or sign out.
+- `password`: password verified and the operator explicitly chose not to use
+  MFA. Normal administration is available, but the interface continuously
+  warns that the account has only one factor. Sensitive authentication changes
+  still require MFA.
 - `mfa`: password and either a user-verifying WebAuthn credential or TOTP code
   were verified.
 - `recovery`: password and a one-use recovery code were verified. This session
   may only enroll a replacement factor, inspect security events, or sign out.
 
 Once an account has any second factor, a password alone never creates an
-administrative session. The first factor is enrolled through a constrained
-bootstrap session. All later factor changes require a recently created `mfa`
-session. Sensitive operations require authentication within the last ten
-minutes; otherwise the operator signs in again.
+administrative session. The first factor is enrolled through a recent
+`bootstrap` or `password` session. All later factor changes require a recently
+created `mfa` session. Sensitive operations require authentication within the
+last ten minutes; otherwise the operator signs in again.
+
+Choosing “Skip MFA for now” is stored as an account preference, audited, and
+converts only the current bootstrap session to `password` assurance. The
+transition is rejected if any factor exists. Enrolling a factor clears the
+preference and makes MFA mandatory on subsequent logins.
 
 ## WebAuthn boundary
 

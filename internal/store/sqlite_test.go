@@ -169,6 +169,71 @@ func TestMigrationsInvalidatePasswordOnlySessionsAndReachCurrentSchema(t *testin
 	}
 }
 
+func TestMigrationFourPreservesAssuredSessions(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "wispdeck.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`CREATE TABLE schema_version (version INTEGER NOT NULL) STRICT`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrationOne(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrationTwo(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrationThree(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_version (version) VALUES (3)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO users VALUES ('user-1', 'alice', 'hash', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	digest := make([]byte, 32)
+	if _, err := tx.Exec(`
+		INSERT INTO sessions (
+			token_hash, user_id, csrf_token, created_at, last_seen, expires_at,
+			assurance, authenticated_at, client_ip, user_agent
+		) VALUES (?, 'user-1', 'csrf', 1, 1, 100, 'mfa', 1, '192.0.2.1', 'browser')`, digest); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	var assurance string
+	if err := database.db.QueryRow(`SELECT assurance FROM sessions WHERE token_hash = ?`, digest).Scan(&assurance); err != nil {
+		t.Fatal(err)
+	}
+	if assurance != string(auth.AssuranceMFA) {
+		t.Fatalf("migrated assurance = %q", assurance)
+	}
+	user, err := database.UserByUsername(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.MFASkipped {
+		t.Fatal("migration unexpectedly opted existing user out of MFA")
+	}
+}
+
 func TestSQLiteMFAStateLifecycle(t *testing.T) {
 	ctx := context.Background()
 	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "wispdeck.db"))

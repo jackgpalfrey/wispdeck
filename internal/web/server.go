@@ -138,6 +138,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /{$}", s.requireSession(http.HandlerFunc(s.dashboard)))
 	mux.Handle("POST /logout", s.requireSession(http.HandlerFunc(s.logout)))
 	mux.Handle("GET /security/passkeys", s.requireSession(http.HandlerFunc(s.passkeySettings)))
+	mux.Handle("POST /security/mfa/skip", s.requireSession(http.HandlerFunc(s.skipMFA)))
 	mux.Handle("POST /api/auth/passkey/register/begin", s.requireSession(http.HandlerFunc(s.beginPasskeyRegistration)))
 	mux.Handle("POST /api/auth/passkey/register/finish", s.requireSession(http.HandlerFunc(s.finishPasskeyRegistration)))
 	mux.Handle("POST /security/passkeys/delete", s.requireSession(http.HandlerFunc(s.deletePasskey)))
@@ -233,7 +234,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	token, _, passkeyRequired, err := s.passkeys.AfterPassword(
+	token, session, factorRequired, err := s.passkeys.AfterPassword(
 		r.Context(), user, clientIP, r.UserAgent(),
 	)
 	if err != nil {
@@ -241,25 +242,44 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if passkeyRequired {
+	if factorRequired {
 		s.setOpaqueCookie(w, s.loginCookieName, token)
 		http.Redirect(w, r, "/login/passkey", http.StatusSeeOther)
 		return
 	}
 	s.setSessionCookie(w, token)
+	if session.Assurance == auth.AssurancePassword {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	session := sessionFromContext(r.Context())
-	if session.Assurance != auth.AssuranceMFA {
+	if session.Assurance != auth.AssuranceMFA && session.Assurance != auth.AssurancePassword {
 		http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
 		return
 	}
 	s.render(w, http.StatusOK, "dashboard.html", struct {
 		Username  string
 		CSRFToken string
-	}{Username: session.User.Username, CSRFToken: session.CSRFToken})
+		Assurance auth.Assurance
+	}{Username: session.User.Username, CSRFToken: session.CSRFToken, Assurance: session.Assurance})
+}
+
+func (s *Server) skipMFA(w http.ResponseWriter, r *http.Request) {
+	session := sessionFromContext(r.Context())
+	if !s.validBrowserOrigin(r) || !validCSRF(w, r, session.CSRFToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := s.passkeys.SkipMFA(r.Context(), session); err != nil {
+		s.config.Logger.WarnContext(r.Context(), "reject MFA opt-out", "error", err)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (s *Server) passkeyLoginPage(w http.ResponseWriter, r *http.Request) {

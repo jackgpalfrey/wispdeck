@@ -10,6 +10,9 @@
   <main class="panel">
     <h1>Wispdeck</h1>
     <p>Signed in as <strong>{{.Username}}</strong>.</p>
+    {{if eq .Assurance "password"}}
+      <p class="notice">MFA is not enabled. This account is protected only by its password. <a href="/security/passkeys">Set up MFA</a>.</p>
+    {{end}}
     <p class="subtle">Links, sites, and data will live here.</p>
     <form action="/logout" method="post">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
@@ -18,4 +21,3 @@
   </main>
 </body>
 </html>{{end}}
-

@@ -140,6 +140,9 @@ func (s *SQLite) CompleteTOTPEnrollment(
 	if rows != 1 {
 		return auth.ErrTOTPAlreadyConfigured
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET mfa_skipped = 0 WHERE id = ?`, record.UserID); err != nil {
+		return fmt.Errorf("clear MFA opt-out after TOTP registration: %w", err)
+	}
 	if len(recoveryRecords) > 0 {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id = ?`, record.UserID); err != nil {
 			return fmt.Errorf("delete old recovery codes: %w", err)
@@ -156,6 +159,13 @@ func (s *SQLite) CompleteTOTPEnrollment(
 				return fmt.Errorf("insert TOTP recovery code: %w", err)
 			}
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM sessions
+		WHERE user_id = ? AND token_hash <> ? AND assurance <> ?`,
+		record.UserID, sessionDigest[:], auth.AssuranceMFA,
+	); err != nil {
+		return fmt.Errorf("revoke other non-MFA sessions after TOTP registration: %w", err)
 	}
 	result, err = tx.ExecContext(ctx, `
 		UPDATE sessions SET assurance = ?, authenticated_at = ?

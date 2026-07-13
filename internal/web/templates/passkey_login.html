@@ -15,6 +15,7 @@
     {{if .HasPasskey}}
     <p id="passkey-status" class="error hidden" role="alert"></p>
     <button type="button" data-passkey-login>Use passkey</button>
+    <button type="button" class="secondary" data-use-another-factor>Use another method</button>
     {{end}}
     {{if .HasTOTP}}
     <form action="/login/totp" method="post">

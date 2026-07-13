@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -255,6 +256,127 @@ func TestAuthenticatedLogoutRequiresCSRFAndInvalidatesSession(t *testing.T) {
 	}
 }
 
+func TestBootstrapCanPersistentlySkipMFA(t *testing.T) {
+	server := newTestServer(t, false)
+	login := request(http.MethodPost, "http://admin.example.test/login", url.Values{
+		"username": {"alice"}, "password": {"correct horse battery staple"},
+	})
+	login.Header.Set("Origin", "http://admin.example.test")
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, login)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/security/passkeys" {
+		t.Fatalf("initial login = (%d, %q)", w.Code, w.Header().Get("Location"))
+	}
+	sessionCookie := responseCookie(t, w.Result(), "wispdeck_session")
+	session, err := server.authService.Authenticate(context.Background(), sessionCookie.Value)
+	if err != nil || session.Assurance != auth.AssuranceBootstrap {
+		t.Fatalf("bootstrap session = (%#v, %v)", session, err)
+	}
+
+	settings := request(http.MethodGet, "http://admin.example.test/security/passkeys", nil)
+	settings.AddCookie(sessionCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, settings)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Skip MFA for now") {
+		t.Fatalf("bootstrap settings = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	invalid := request(http.MethodPost, "http://admin.example.test/security/mfa/skip", url.Values{
+		"csrf_token": {"invalid"},
+	})
+	invalid.Header.Set("Origin", "http://admin.example.test")
+	invalid.AddCookie(sessionCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, invalid)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("invalid-CSRF MFA opt-out status = %d", w.Code)
+	}
+
+	skip := request(http.MethodPost, "http://admin.example.test/security/mfa/skip", url.Values{
+		"csrf_token": {session.CSRFToken},
+	})
+	skip.Header.Set("Origin", "http://admin.example.test")
+	skip.AddCookie(sessionCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, skip)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatalf("MFA opt-out = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+	session, err = server.authService.Authenticate(context.Background(), sessionCookie.Value)
+	if err != nil || session.Assurance != auth.AssurancePassword {
+		t.Fatalf("password-only session = (%#v, %v)", session, err)
+	}
+
+	dashboard := request(http.MethodGet, "http://admin.example.test/", nil)
+	dashboard.AddCookie(sessionCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, dashboard)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "MFA is not enabled") {
+		t.Fatalf("password-only dashboard = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	setup := request(http.MethodPost, "http://admin.example.test/security/totp/setup", url.Values{
+		"csrf_token": {session.CSRFToken},
+	})
+	setup.Header.Set("Origin", "http://admin.example.test")
+	setup.AddCookie(sessionCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, setup)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Set up authenticator app") {
+		t.Fatalf("password-only MFA setup = (%d, %q)", w.Code, w.Body.String())
+	}
+	enrollmentCookie := responseCookie(t, w.Result(), "wispdeck_totp_enrollment")
+	key, err := server.totp.EnrollmentKey(context.Background(), session, enrollmentCookie.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	login = request(http.MethodPost, "http://admin.example.test/login", url.Values{
+		"username": {"alice"}, "password": {"correct horse battery staple"},
+	})
+	login.Header.Set("Origin", "http://admin.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, login)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatalf("password-only repeat login = (%d, %q)", w.Code, w.Header().Get("Location"))
+	}
+	repeatCookie := responseCookie(t, w.Result(), "wispdeck_session")
+	repeatSession, err := server.authService.Authenticate(context.Background(), repeatCookie.Value)
+	if err != nil || repeatSession.Assurance != auth.AssurancePassword {
+		t.Fatalf("repeat password-only session = (%#v, %v)", repeatSession, err)
+	}
+
+	code, err := totplib.GenerateCode(key.Secret(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm := request(http.MethodPost, "http://admin.example.test/security/totp/confirm", url.Values{
+		"csrf_token": {session.CSRFToken}, "totp_code": {code},
+	})
+	confirm.Header.Set("Origin", "http://admin.example.test")
+	confirm.AddCookie(sessionCookie)
+	confirm.AddCookie(enrollmentCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, confirm)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Save these recovery codes") {
+		t.Fatalf("password-only TOTP confirmation = (%d, %q)", w.Code, w.Body.String())
+	}
+	elevated, err := server.authService.Authenticate(context.Background(), sessionCookie.Value)
+	if err != nil || elevated.Assurance != auth.AssuranceMFA {
+		t.Fatalf("elevated password-only session = (%#v, %v)", elevated, err)
+	}
+	if _, err := server.authService.Authenticate(context.Background(), repeatCookie.Value); !errors.Is(err, auth.ErrInvalidSession) {
+		t.Fatalf("other password-only session survived MFA enrollment: %v", err)
+	}
+	user, err := server.database.UserByUsername(context.Background(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.MFASkipped {
+		t.Fatal("MFA enrollment did not clear persisted opt-out")
+	}
+}
+
 func TestTOTPBootstrapAndLoginFlow(t *testing.T) {
 	server := newTestServer(t, false)
 	login := request(http.MethodPost, "http://admin.example.test/login", url.Values{
@@ -329,7 +451,7 @@ func TestTOTPBootstrapAndLoginFlow(t *testing.T) {
 	factorPage.AddCookie(loginCookie)
 	w = httptest.NewRecorder()
 	server.handler.ServeHTTP(w, factorPage)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Authenticator code") || strings.Contains(w.Body.String(), "Use passkey") {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Authenticator code") || strings.Contains(w.Body.String(), "Skip MFA") {
 		t.Fatalf("factor page = (%d, %q)", w.Code, w.Body.String())
 	}
 	nextCode, err := totplib.GenerateCode(key.Secret(), time.Now().UTC().Add(30*time.Second))
@@ -449,5 +571,41 @@ func TestEnrolledAccountRequiresPasskeyPhase(t *testing.T) {
 	server.handler.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "publicKey") {
 		t.Fatalf("passkey begin = (%d, %q)", w.Code, w.Body.String())
+	}
+}
+
+func TestPasskeyLoginPageOffersAnotherFactor(t *testing.T) {
+	server := newTestServer(t, false)
+	user, err := server.authService.VerifyCredentials(context.Background(), "alice", "correct horse battery staple", "192.0.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := webauthnlib.Credential{ID: []byte("credential")}
+	serialized, _ := json.Marshal(credential)
+	encrypted, err := server.keys.EncryptCredential(serialized, user.ID, server.passkeys.RPID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.database.CreatePasskey(context.Background(), auth.PasskeyRecord{
+		CredentialID: credential.ID, UserID: user.ID, RPID: server.passkeys.RPID(),
+		Name: "laptop", EncryptedRecord: encrypted, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := request(http.MethodPost, "http://admin.example.test/login", url.Values{
+		"username": {"alice"}, "password": {"correct horse battery staple"},
+	})
+	r.Header.Set("Origin", "http://admin.example.test")
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, r)
+	loginCookie := w.Result().Cookies()[0]
+
+	r = request(http.MethodGet, "http://admin.example.test/login/passkey", nil)
+	r.AddCookie(loginCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Use another method") || !strings.Contains(w.Body.String(), "Use passkey") || strings.Contains(w.Body.String(), "Skip MFA") {
+		t.Fatalf("passkey page = (%d, %q)", w.Code, w.Body.String())
 	}
 }

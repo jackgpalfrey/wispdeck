@@ -24,6 +24,7 @@ type User struct {
 	ID           string
 	Username     string
 	PasswordHash string
+	MFASkipped   bool
 }
 
 type Principal struct {
@@ -35,6 +36,7 @@ type Assurance string
 
 const (
 	AssuranceBootstrap Assurance = "bootstrap"
+	AssurancePassword  Assurance = "password"
 	AssuranceMFA       Assurance = "mfa"
 	AssuranceRecovery  Assurance = "recovery"
 )
@@ -176,7 +178,7 @@ func (s *Service) VerifyCredentials(ctx context.Context, username, password, cli
 }
 
 func (s *Service) NewSession(ctx context.Context, user User, assurance Assurance, clientIP, userAgent string) (string, Session, error) {
-	if assurance != AssuranceBootstrap && assurance != AssuranceMFA && assurance != AssuranceRecovery {
+	if assurance != AssuranceBootstrap && assurance != AssurancePassword && assurance != AssuranceMFA && assurance != AssuranceRecovery {
 		return "", Session{}, errors.New("invalid session assurance")
 	}
 	now := s.now().UTC()

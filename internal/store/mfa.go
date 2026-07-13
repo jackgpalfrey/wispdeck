@@ -61,6 +61,54 @@ func (s *SQLite) PasskeyCount(ctx context.Context, userID, rpID string) (int, er
 	return count, nil
 }
 
+func (s *SQLite) SkipMFA(
+	ctx context.Context,
+	userID, rpID string,
+	sessionDigest [32]byte,
+	now time.Time,
+) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin MFA opt-out: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var factorCount int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT
+			(SELECT count(*) FROM webauthn_credentials WHERE user_id = ? AND rp_id = ?) +
+			(SELECT count(*) FROM totp_credentials WHERE user_id = ?)`,
+		userID, rpID, userID,
+	).Scan(&factorCount); err != nil {
+		return fmt.Errorf("count factors before MFA opt-out: %w", err)
+	}
+	if factorCount != 0 {
+		return auth.ErrRecentMFARequired
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE sessions SET assurance = ?, authenticated_at = ?
+		WHERE token_hash = ? AND user_id = ? AND assurance = ?`,
+		auth.AssurancePassword, unix(now), sessionDigest[:], userID, auth.AssuranceBootstrap,
+	)
+	if err != nil {
+		return fmt.Errorf("convert bootstrap session: %w", err)
+	}
+	if err := requireOneRow(result, "bootstrap session"); err != nil {
+		return err
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE users SET mfa_skipped = 1, updated_at = ? WHERE id = ?`, unix(now), userID)
+	if err != nil {
+		return fmt.Errorf("store MFA opt-out: %w", err)
+	}
+	if err := requireOneRow(result, "MFA opt-out user"); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit MFA opt-out: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLite) CreatePasskey(ctx context.Context, record auth.PasskeyRecord) error {
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO webauthn_credentials (
@@ -112,6 +160,9 @@ func (s *SQLite) CompletePasskeyRegistration(
 	if rows != 1 {
 		return ErrPasskeyNameExists
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET mfa_skipped = 0 WHERE id = ?`, record.UserID); err != nil {
+		return fmt.Errorf("clear MFA opt-out after passkey registration: %w", err)
+	}
 	if len(recoveryRecords) > 0 {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id = ?`, record.UserID); err != nil {
 			return fmt.Errorf("delete old recovery codes: %w", err)
@@ -126,6 +177,13 @@ func (s *SQLite) CompletePasskeyRegistration(
 				return fmt.Errorf("insert registration recovery code: %w", err)
 			}
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM sessions
+		WHERE user_id = ? AND token_hash <> ? AND assurance <> ?`,
+		record.UserID, sessionDigest[:], auth.AssuranceMFA,
+	); err != nil {
+		return fmt.Errorf("revoke other non-MFA sessions after passkey registration: %w", err)
 	}
 	result, err = tx.ExecContext(ctx, `
 		UPDATE sessions SET assurance = ?, authenticated_at = ?
@@ -458,6 +516,9 @@ func (s *SQLite) ResetUserMFA(ctx context.Context, userID string) error {
 		return fmt.Errorf("begin MFA reset: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET mfa_skipped = 0 WHERE id = ?`, userID); err != nil {
+		return fmt.Errorf("clear MFA opt-out: %w", err)
+	}
 	for _, statement := range []string{
 		`DELETE FROM totp_enrollments WHERE user_id = ?`,
 		`DELETE FROM totp_credentials WHERE user_id = ?`,
@@ -484,7 +545,7 @@ func (s *SQLite) ResetUserAuthentication(ctx context.Context, userID, passwordHa
 	}
 	defer func() { _ = tx.Rollback() }()
 	result, err := tx.ExecContext(ctx,
-		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, unix(now), userID,
+		`UPDATE users SET password_hash = ?, mfa_skipped = 0, updated_at = ? WHERE id = ?`, passwordHash, unix(now), userID,
 	)
 	if err != nil {
 		return fmt.Errorf("update locally reset password: %w", err)

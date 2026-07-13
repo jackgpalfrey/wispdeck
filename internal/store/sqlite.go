@@ -88,8 +88,8 @@ func (s *SQLite) CreateUser(ctx context.Context, username, passwordHash string, 
 func (s *SQLite) UserByUsername(ctx context.Context, username string) (auth.User, error) {
 	var user auth.User
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, username, password_hash FROM users WHERE username = ?`, username,
-	).Scan(&user.ID, &user.Username, &user.PasswordHash)
+		`SELECT id, username, password_hash, mfa_skipped FROM users WHERE username = ?`, username,
+	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.MFASkipped)
 	if errors.Is(err, sql.ErrNoRows) {
 		return auth.User{}, auth.ErrUserNotFound
 	}
@@ -102,8 +102,8 @@ func (s *SQLite) UserByUsername(ctx context.Context, username string) (auth.User
 func (s *SQLite) UserByID(ctx context.Context, userID string) (auth.User, error) {
 	var user auth.User
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, username, password_hash FROM users WHERE id = ?`, userID,
-	).Scan(&user.ID, &user.Username, &user.PasswordHash)
+		`SELECT id, username, password_hash, mfa_skipped FROM users WHERE id = ?`, userID,
+	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.MFASkipped)
 	if errors.Is(err, sql.ErrNoRows) {
 		return auth.User{}, auth.ErrUserNotFound
 	}
@@ -155,17 +155,24 @@ func (s *SQLite) ChangePasswordAndRevoke(ctx context.Context, userID, passwordHa
 }
 
 func (s *SQLite) CreateSession(ctx context.Context, session auth.SessionRecord) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO sessions (
 			token_hash, user_id, csrf_token, created_at, last_seen, expires_at,
 			assurance, authenticated_at, client_ip, user_agent
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE ? <> ? OR EXISTS (
+			SELECT 1 FROM users WHERE id = ? AND mfa_skipped = 1
+		)`,
 		session.TokenHash[:], session.UserID, session.CSRFToken,
 		unix(session.CreatedAt), unix(session.LastSeen), unix(session.ExpiresAt),
 		session.Assurance, unix(session.AuthenticatedAt), session.ClientIP, session.UserAgent,
+		session.Assurance, auth.AssurancePassword, session.UserID,
 	)
 	if err != nil {
+		return fmt.Errorf("insert session: %w", err)
+	}
+	if err := requireOneRow(result, "session"); err != nil {
 		return fmt.Errorf("insert session: %w", err)
 	}
 	return nil

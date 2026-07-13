@@ -11,7 +11,9 @@
   <main class="panel wide">
     <h1>Authentication</h1>
     {{if eq .Assurance "bootstrap"}}
-      <p class="notice">Add a passkey or authenticator app to finish securing this account. Other administration is unavailable until you do.</p>
+      <p class="notice">Add a passkey or authenticator app to secure this account, or continue with password-only sign-in.</p>
+    {{else if eq .Assurance "password"}}
+      <p class="notice">MFA is not enabled. This account is protected only by its password.</p>
     {{else if eq .Assurance "recovery"}}
       <p class="notice">You signed in with a recovery code. Add a replacement passkey before continuing.</p>
     {{else}}
@@ -105,7 +107,17 @@
       <button type="button" class="secondary" data-copy-codes>Copy codes</button>
     </section>
 
-    {{if eq .Assurance "mfa"}}<p><a href="/">Return to Wispdeck</a></p>{{end}}
+    {{if or (eq .Assurance "mfa") (eq .Assurance "password")}}<p><a href="/">Return to Wispdeck</a></p>{{end}}
+    {{if eq .Assurance "bootstrap"}}
+    <section>
+      <h2>Continue without MFA</h2>
+      <p class="subtle">Your password will be the only protection on this account. You can enable MFA later from Authentication.</p>
+      <form action="/security/mfa/skip" method="post">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button type="submit" class="secondary">Skip MFA for now</button>
+      </form>
+    </section>
+    {{end}}
     <form action="/logout" method="post">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
       <button type="submit" class="secondary">Sign out</button>
