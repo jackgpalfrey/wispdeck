@@ -412,7 +412,7 @@ func (s *Server) serveSiteHost(w http.ResponseWriter, r *http.Request, name stri
 			s.renderDraftGate(w, r, value)
 			return
 		}
-		http.NotFound(w, r)
+		s.renderEmptySite(w, r, value)
 		return
 	}
 	s.serveSiteFile(w, r, value, releaseID, "current", false)
@@ -514,14 +514,33 @@ func hostedFilePath(requestPath string) (string, bool) {
 }
 
 func (s *Server) renderDraftGate(w http.ResponseWriter, r *http.Request, value hostedsite.Site) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
 	entry := *s.config.AppOrigin
 	entry.Path = "/sites/" + value.Name + "/preview-entry"
-	s.render(w, http.StatusUnauthorized, "site_draft.html", struct {
-		Name     string
-		LoginURL string
-	}{Name: value.Name, LoginURL: entry.String()})
+	s.renderSiteState(w, http.StatusUnauthorized, siteStateView{
+		Draft: true, Name: value.Name, ActionURL: entry.String(),
+	})
+}
+
+func (s *Server) renderEmptySite(w http.ResponseWriter, _ *http.Request, value hostedsite.Site) {
+	manage := *s.config.AppOrigin
+	manage.Path = "/"
+	manage.RawQuery = url.Values{"site": {value.Name}}.Encode()
+	manage.Fragment = "sites"
+	s.renderSiteState(w, http.StatusOK, siteStateView{
+		Name: value.Name, ActionURL: manage.String(),
+	})
+}
+
+type siteStateView struct {
+	Draft     bool
+	Name      string
+	ActionURL string
+}
+
+func (s *Server) renderSiteState(w http.ResponseWriter, status int, view siteStateView) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+	s.render(w, status, "site_state.html", view)
 }
 
 func (s *Server) acceptSitePreview(w http.ResponseWriter, r *http.Request, originLabel string) {

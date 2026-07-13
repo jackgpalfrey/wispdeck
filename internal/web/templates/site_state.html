@@ -1,9 +1,10 @@
-{{define "site_draft.html"}}<!doctype html>
+{{define "site_state.html"}}<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Draft site — Wispdeck</title>
+  <meta name="robots" content="noindex,nofollow">
+  <title>{{if .Draft}}Draft site{{else}}Site reserved{{end}} — Wispdeck</title>
   <style>
     :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
     body { display:grid; min-height:100vh; margin:0; padding:1.5rem; box-sizing:border-box; place-items:center; background:#101116; color:#f4f5f8; }
@@ -18,10 +19,17 @@
 <body>
   <main>
     <div class="mark" aria-hidden="true">W</div>
-    <h1>This site is currently a draft</h1>
-    <p><strong>{{.Name}}</strong> has not been published yet. Its owner can sign in to preview the draft.</p>
-    <a href="{{.LoginURL}}">Sign in to preview</a>
-    <small>Other visitors cannot access draft files.</small>
+    {{if .Draft}}
+      <h1>This site is currently a draft</h1>
+      <p><strong>{{.Name}}</strong> has not been published yet. Its owner can sign in to preview the draft.</p>
+      <a href="{{.ActionURL}}">Sign in to preview</a>
+      <small>Other visitors cannot access draft files.</small>
+    {{else}}
+      <h1>This address is ready</h1>
+      <p><strong>{{.Name}}</strong> has been reserved, but its first site has not been uploaded yet.</p>
+      <a href="{{.ActionURL}}">Manage this site</a>
+      <small>Once its owner uploads and publishes a site, it will appear here.</small>
+    {{end}}
   </main>
 </body>
 </html>{{end}}

@@ -362,6 +362,17 @@ func TestHostedSiteDraftPreviewPublishRollbackAndAliases(t *testing.T) {
 		t.Fatalf("create site = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
 	}
 
+	empty := siteRequest(http.MethodGet, "http://docs.sites.example.test/", "docs.sites.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, empty)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "This address is ready") ||
+		!strings.Contains(w.Body.String(), "Manage this site") || strings.Contains(w.Body.String(), "Product docs") {
+		t.Fatalf("empty site placeholder = (%d, %q)", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Content-Security-Policy") == "" {
+		t.Fatalf("empty site headers = %#v", w.Header())
+	}
+
 	values := directShortLinkValues(session.CSRFToken, "docs", "https://example.com")
 	link := request(http.MethodPost, "http://admin.example.test/links/create", values)
 	link.Header.Set("Origin", "http://admin.example.test")

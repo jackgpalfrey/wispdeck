@@ -19,6 +19,8 @@ database and read only in response to a request. Uploading a ZIP creates an
 immutable release and selects it as the draft. It never changes the public
 release. Publishing and rollback are atomic pointer changes, so a visitor sees
 one complete release or another rather than a partially deployed directory.
+Before the first upload, the reserved public origin shows a non-indexable
+Wispdeck placeholder with a route back to site management.
 
 The first draft is private. Its public origin shows a Wispdeck draft gate and
 offers the owner a sign-in path. Once a release has been published, ordinary
