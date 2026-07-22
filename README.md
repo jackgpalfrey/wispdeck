@@ -12,7 +12,10 @@ as private drafts, and publish or roll back with an atomic release switch. Each
 site has an owner-only Wispist data console for usage, JSON export,
 revision-safe document repair, collection clearing, and permanent cleanup.
 Retained releases and per-user resources are bounded by configurable
-installation limits. Superusers can manage every user's links and sites. See
+installation limits. Superusers can manage every user's links and sites, and
+can customise the instance name, public tagline, accent colour, and whether
+signed-out visitors see a landing page from Settings without restarting the
+server. See
 [`docs/security-model.md`](docs/security-model.md),
 [`docs/authentication.md`](docs/authentication.md), and
 [`docs/hosting.md`](docs/hosting.md) for the contracts that shape it. The Wispist
@@ -39,14 +42,22 @@ go test ./...
 go vet ./...
 ```
 
-Generate the installation authentication key before creating the first local
-superuser. Neither operation puts a secret in shell history:
+Build and start a fresh development instance directly:
 
 ```sh
 go build -o wispdeck ./cmd/wispdeck
-./wispdeck auth-key generate
-./wispdeck admin create --username admin
+./wispdeck serve \
+  --development \
+  --offline-password-check \
+  --app-origin http://localhost:8080
 ```
+
+When no control database or authentication key exists, `serve` creates both,
+prints a six-character setup code, and redirects the browser to
+`/onboarding`. Enter that code to create the first superuser; the browser then
+continues into passkey, authenticator-app, or explicit password-only setup. The
+`auth-key generate` and `admin create` commands remain available for operators
+who prefer an entirely local bootstrap.
 
 Use `wispdeck backup create` while the server is stopped to back up
 `data/auth.key`, `data/wispdeck.db`, and every Wispist database as one verified
@@ -60,8 +71,8 @@ CLI operations.
 
 For a production deployment, terminate TLS at a reverse proxy that preserves
 the original `Host` header, then provide the exact public application origin.
-Before starting the service, run the production preflight with the same paths
-and origin flags:
+After bootstrapping state locally and before exposing the service publicly, run
+the production preflight with the same paths and origin flags:
 
 ```sh
 ./wispdeck doctor \

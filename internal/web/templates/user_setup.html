@@ -2,14 +2,13 @@
 <html lang="en" class="no-js">
 <head>
   {{template "head_assets"}}
-  <title>Set up {{.Username}} — Wispdeck</title>
+  <title>Set up {{.Username}} — {{brand}}</title>
 </head>
 <body>
   <main class="auth-main">
     <div class="auth-box">
       <span class="brand">
-        <span class="brand-mark" aria-hidden="true">w</span>
-        <span>Wispdeck</span>
+        {{template "brand_identity"}}
       </span>
       <div class="auth-card on-card">
         <div>

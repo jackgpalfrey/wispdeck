@@ -168,7 +168,7 @@ func TestMigrationsInvalidatePasswordOnlySessionsAndReachCurrentSchema(t *testin
 		"short_link_destinations", "short_link_daily_stats", "short_link_audit_events",
 		"public_names", "sites", "site_releases", "site_files",
 		"site_preview_grants", "site_preview_sessions", "site_audit_events",
-		"update_settings", "update_events",
+		"update_settings", "update_events", "branding_settings", "branding_events",
 	} {
 		if err := database.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
 			t.Fatalf("schema v7 table %s missing: %v", table, err)

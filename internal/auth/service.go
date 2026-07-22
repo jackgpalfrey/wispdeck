@@ -18,6 +18,7 @@ var (
 	ErrForbidden          = errors.New("forbidden")
 	ErrLastSuperuser      = errors.New("cannot remove the final active superuser")
 	ErrInvalidSetupToken  = errors.New("invalid or expired setup token")
+	ErrAlreadyInitialized = errors.New("installation is already initialized")
 	ErrInvalidUserState   = errors.New("invalid user state transition")
 	ErrUserExists         = errors.New("user already exists")
 	ErrInvalidRole        = errors.New("invalid role")
@@ -102,6 +103,8 @@ type SessionRecord struct {
 }
 
 type Repository interface {
+	InstallationInitialized(context.Context) (bool, error)
+	CreateInitialUser(context.Context, string, string, string, time.Time) (User, error)
 	UserByUsername(context.Context, string) (User, error)
 	UserByID(context.Context, string) (User, error)
 	UpdatePasswordHash(context.Context, string, string, time.Time) error

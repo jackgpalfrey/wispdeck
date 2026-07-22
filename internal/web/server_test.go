@@ -22,6 +22,7 @@ import (
 	webauthnlib "github.com/go-webauthn/webauthn/webauthn"
 	totplib "github.com/pquerna/otp/totp"
 	"github.com/wispdeck/wispdeck/internal/auth"
+	"github.com/wispdeck/wispdeck/internal/branding"
 	"github.com/wispdeck/wispdeck/internal/shortlink"
 	"github.com/wispdeck/wispdeck/internal/site"
 	"github.com/wispdeck/wispdeck/internal/store"
@@ -40,7 +41,9 @@ type testServer struct {
 	links       *shortlink.Service
 	sites       *site.Service
 	wispist     *wispist.Engine
+	branding    *branding.Service
 	updates     *updater.Manager
+	setupCode   string
 }
 
 func newTestServer(t *testing.T, production bool) testServer {
@@ -51,6 +54,19 @@ func newTestServerWithUpdates(
 	t *testing.T,
 	production bool,
 	updateFactory func(*store.SQLite) *updater.Manager,
+) testServer {
+	return newTestServerState(t, production, updateFactory, true)
+}
+
+func newOnboardingTestServer(t *testing.T, production bool) testServer {
+	return newTestServerState(t, production, nil, false)
+}
+
+func newTestServerState(
+	t *testing.T,
+	production bool,
+	updateFactory func(*store.SQLite) *updater.Manager,
+	createInitialUser bool,
 ) testServer {
 	t.Helper()
 	ctx := context.Background()
@@ -67,12 +83,14 @@ func newTestServerWithUpdates(
 	if err != nil {
 		t.Fatal(err)
 	}
-	hash, err := passwords.Hash("correct horse battery staple")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.CreateUser(ctx, "alice", hash, time.Now()); err != nil {
-		t.Fatal(err)
+	if createInitialUser {
+		hash, err := passwords.Hash("correct horse battery staple")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.CreateUser(ctx, "alice", hash, time.Now()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	authService, err := auth.NewService(database, passwords)
 	if err != nil {
@@ -117,13 +135,20 @@ func newTestServerWithUpdates(
 	if updateFactory != nil {
 		updateManager = updateFactory(database)
 	}
+	brandingService, err := branding.NewService(ctx, database, "sites.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupCode := "ABCD23"
 	server, err := New(Config{
-		AppOrigin:       origin,
-		SiteDomain:      "sites.example.test",
-		Development:     !production,
-		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
-		PasswordChecker: auth.NewStaticPasswordChecker(),
-	}, authService, passkeyService, totpService, shortLinkService, siteService, wispistEngine, updateManager)
+		AppOrigin:        origin,
+		SiteDomain:       "sites.example.test",
+		Development:      !production,
+		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PasswordChecker:  auth.NewStaticPasswordChecker(),
+		InitialSetupCode: setupCode,
+	}, authService, passkeyService, totpService, shortLinkService, siteService,
+		wispistEngine, brandingService, updateManager)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +156,7 @@ func newTestServerWithUpdates(
 		handler: server.Handler(), authService: authService,
 		database: database, keys: keyMaterial, passkeys: passkeyService,
 		totp: totpService, links: shortLinkService, sites: siteService, wispist: wispistEngine,
-		updates: updateManager,
+		branding: brandingService, updates: updateManager, setupCode: setupCode,
 	}
 }
 

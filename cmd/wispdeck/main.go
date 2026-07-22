@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/wispdeck/wispdeck/internal/auth"
+	"github.com/wispdeck/wispdeck/internal/branding"
 	"github.com/wispdeck/wispdeck/internal/buildinfo"
 	"github.com/wispdeck/wispdeck/internal/installation"
 	"github.com/wispdeck/wispdeck/internal/shortlink"
@@ -315,6 +316,13 @@ func serve(args []string, logger *slog.Logger) (result error) {
 		return fmt.Errorf("start Wispdeck: %w", err)
 	}
 	defer stateLock.Close()
+	generatedAuthKey, err := ensureServeInstallationKey(*database, *authKey)
+	if err != nil {
+		return err
+	}
+	if generatedAuthKey {
+		logger.Info("generated installation authentication key", "path", *authKey)
+	}
 	recovery, recoveryErr := updater.BeginStartup(*database, buildinfo.Current().Version, "")
 	if recovery != nil {
 		defer func() {
@@ -344,6 +352,14 @@ func serve(args []string, logger *slog.Logger) (result error) {
 	}
 	stopMaintenance := startMaintenance(databaseStore, maintenancePolicy, logger)
 	defer stopMaintenance()
+	brandingFallback := strings.TrimSpace(*siteDomain)
+	if brandingFallback == "" {
+		brandingFallback = origin.Hostname()
+	}
+	brandingService, err := branding.NewService(ctx, databaseStore, brandingFallback)
+	if err != nil {
+		return fmt.Errorf("load instance branding: %w", err)
+	}
 	keyMaterial, err := auth.LoadInstallationKey(*authKey)
 	if err != nil {
 		return err
@@ -355,6 +371,17 @@ func serve(args []string, logger *slog.Logger) (result error) {
 	authService, err := auth.NewService(databaseStore, passwordManager)
 	if err != nil {
 		return err
+	}
+	installationInitialized, err := authService.InstallationInitialized(ctx)
+	if err != nil {
+		return err
+	}
+	initialSetupCode := ""
+	if !installationInitialized {
+		initialSetupCode, err = auth.NewInitialSetupCode()
+		if err != nil {
+			return err
+		}
 	}
 	passkeyService, err := auth.NewPasskeyService(databaseStore, authService, keyMaterial, origin)
 	if err != nil {
@@ -447,7 +474,9 @@ func serve(args []string, logger *slog.Logger) (result error) {
 		Logger:            logger,
 		PasswordChecker:   passwordChecker,
 		TrustedProxyCIDRs: trustedProxies,
-	}, authService, passkeyService, totpService, shortLinkService, siteService, wispistEngine, updateManager)
+		InitialSetupCode:  initialSetupCode,
+	}, authService, passkeyService, totpService, shortLinkService, siteService,
+		wispistEngine, brandingService, updateManager)
 	if err != nil {
 		return err
 	}
@@ -488,6 +517,15 @@ func serve(args []string, logger *slog.Logger) (result error) {
 		return fmt.Errorf("listen HTTP: %w", err)
 	}
 	logger.Info("starting Wispdeck application server", "listen", *listen, "origin", origin.String())
+	if !installationInitialized {
+		setupURL := *origin
+		setupURL.Path = "/onboarding"
+		logger.Warn(
+			"initial setup required",
+			"url", setupURL.String(),
+			"setup_code", initialSetupCode,
+		)
+	}
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- httpServer.Serve(listener) }()
 	if recovery != nil {
@@ -738,6 +776,28 @@ func loopbackAddress(address string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func ensureServeInstallationKey(databasePath, keyPath string) (bool, error) {
+	if _, err := os.Lstat(databasePath); err == nil {
+		if _, keyErr := os.Lstat(keyPath); errors.Is(keyErr, os.ErrNotExist) {
+			return false, errors.New("installation authentication key is missing for an existing database; restore the original key or a complete backup")
+		} else if keyErr != nil {
+			return false, fmt.Errorf("inspect installation authentication key: %w", keyErr)
+		}
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect control database: %w", err)
+	}
+	if _, err := os.Lstat(keyPath); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect installation authentication key: %w", err)
+	}
+	if err := auth.GenerateInstallationKey(keyPath); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func createAdmin(args []string, stdin io.Reader, stdout io.Writer) error {

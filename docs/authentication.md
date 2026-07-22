@@ -7,6 +7,26 @@ authentication and recovery flows. Wispdeck does not claim production-ready
 authentication unless every invariant in this document is implemented and
 tested.
 
+## Initial installation
+
+An installation with no users exposes only the health endpoint, static
+management assets, hosted-content origins, and the `/onboarding` wizard on its
+application origin. Other application requests redirect to the wizard. The
+wizard requires the installation-specific setup code printed by `serve`, a
+valid initial username, and a policy-compliant password. It enforces the normal
+origin and client-address abuse controls.
+
+The six-character setup code is drawn from an unambiguous 32-symbol alphabet
+using the operating-system CSPRNG, giving it 30 bits of entropy. It is held only
+in process memory, changes on every uninitialized restart, and is never stored
+in the control database or sent to the browser. A process-wide limit permits at
+most five guesses per minute regardless of client address. Its authority ends
+when the first user is inserted. The store atomically checks that no user
+exists, creates one active superuser, and records an authentication audit event.
+A successful setup immediately creates a restricted `bootstrap` session and
+continues to factor enrollment. Concurrent or replayed submissions cannot
+create another unauthenticated account.
+
 ## Factors and assurance
 
 An application session has one of four assurance states:

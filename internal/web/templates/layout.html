@@ -1,16 +1,18 @@
 {{define "head_assets"}}<meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="/assets/admin.css">
+  <link rel="stylesheet" href="/assets/branding.css">
   <script src="/assets/theme.js"></script>
   <script src="/assets/app.js" defer></script>{{end}}
 
 {{define "theme_button"}}<button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle colour theme"><span class="theme-icon-light">◐</span><span class="theme-icon-dark">☀</span></button>{{end}}
 
+{{define "brand_identity"}}<span class="brand-mark" aria-hidden="true">{{brandInitial}}</span><span>{{brand}}</span>{{end}}
+
 {{define "app_header"}}
   <header class="shell-header">
-    <a class="brand" href="/" aria-label="Wispdeck home">
-      <span class="brand-mark" aria-hidden="true">{{.Initial}}</span>
-      <span>{{.Brand}}</span>
+    <a class="brand" href="/" aria-label="{{brand}} home">
+      {{template "brand_identity"}}
     </a>
     <nav class="nav-tabs" aria-label="Main navigation">
       <a href="/"{{if eq .Tab "home"}} aria-current="page"{{end}}>My Links</a>

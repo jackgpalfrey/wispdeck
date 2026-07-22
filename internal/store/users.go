@@ -10,6 +10,62 @@ import (
 	"github.com/wispdeck/wispdeck/internal/auth"
 )
 
+func (s *SQLite) InstallationInitialized(ctx context.Context) (bool, error) {
+	var initialized bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users)`).Scan(&initialized); err != nil {
+		return false, fmt.Errorf("check installation users: %w", err)
+	}
+	return initialized, nil
+}
+
+func (s *SQLite) CreateInitialUser(
+	ctx context.Context,
+	username, passwordHash, clientIP string,
+	now time.Time,
+) (auth.User, error) {
+	if err := auth.ValidateUsername(username); err != nil || passwordHash == "" || len(clientIP) > 128 {
+		return auth.User{}, errors.New("invalid initial user")
+	}
+	id, err := randomID()
+	if err != nil {
+		return auth.User{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return auth.User{}, fmt.Errorf("begin initial user creation: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var initialized bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users)`).Scan(&initialized); err != nil {
+		return auth.User{}, fmt.Errorf("check initial user precondition: %w", err)
+	}
+	if initialized {
+		return auth.User{}, auth.ErrAlreadyInitialized
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO users (id, username, password_hash, created_at, updated_at, role, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, username, passwordHash, unix(now), unix(now), auth.RoleSuperuser, auth.UserActive,
+	); err != nil {
+		return auth.User{}, fmt.Errorf("insert initial user: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO auth_events (occurred_at, kind, username, user_id, client_ip, details)
+		VALUES (?, 'initial_superuser_created', ?, ?, NULLIF(?, ''), 'browser onboarding')`,
+		unix(now), username, id, clientIP,
+	); err != nil {
+		return auth.User{}, fmt.Errorf("record initial user creation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return auth.User{}, fmt.Errorf("commit initial user creation: %w", err)
+	}
+	return auth.User{
+		ID: id, Username: username, PasswordHash: passwordHash,
+		Role: auth.RoleSuperuser, Status: auth.UserActive,
+		CreatedAt: now.UTC(), UpdatedAt: now.UTC(),
+	}, nil
+}
+
 func (s *SQLite) CreateManagedUser(
 	ctx context.Context,
 	username, passwordHash string,

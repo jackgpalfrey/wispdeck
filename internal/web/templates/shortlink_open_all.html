@@ -2,7 +2,7 @@
 <html lang="en" class="no-js">
 <head>
   {{template "head_assets"}}
-  <title>Open shared links — Wispdeck</title>
+  <title>Open shared links — {{brand}}</title>
   <script src="/assets/open-all.js" defer></script>
 </head>
 <body>
@@ -10,7 +10,7 @@
     <div class="public-card">
       <h1>Opening shared links</h1>
       <p class="public-sub">/{{.Slug}}</p>
-      <p class="subtle">Wispdeck will try to open every destination. If your browser blocks any tabs, use the button below.</p>
+      <p class="subtle">{{brand}} will try to open every destination. If your browser blocks any tabs, use the button below.</p>
       <button type="button" class="btn" data-open-all>Open all</button>
       <p class="subtle" data-open-all-status aria-live="polite"></p>
       <ul class="public-links" data-open-all-list>

@@ -4,11 +4,87 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/wispdeck/wispdeck/internal/auth"
 )
+
+func TestInitialUserCreationIsSingleUseAndAudited(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "wispdeck.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	initialized, err := database.InstallationInitialized(ctx)
+	if err != nil || initialized {
+		t.Fatalf("fresh initialization state = (%v, %v)", initialized, err)
+	}
+	now := time.Date(2026, 7, 22, 20, 0, 0, 0, time.UTC)
+	created, err := database.CreateInitialUser(ctx, "owner", "password-hash", "192.0.2.8", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Username != "owner" || created.Role != auth.RoleSuperuser || created.Status != auth.UserActive {
+		t.Fatalf("initial user = %+v", created)
+	}
+	initialized, err = database.InstallationInitialized(ctx)
+	if err != nil || !initialized {
+		t.Fatalf("initialized state = (%v, %v)", initialized, err)
+	}
+	if _, err := database.CreateInitialUser(
+		ctx, "attacker", "other-hash", "198.51.100.4", now,
+	); !errors.Is(err, auth.ErrAlreadyInitialized) {
+		t.Fatalf("second initial user error = %v", err)
+	}
+	events, err := database.AuthEventsByUser(ctx, created.ID, 10)
+	if err != nil || len(events) != 1 || events[0].Kind != "initial_superuser_created" ||
+		events[0].ClientIP != "192.0.2.8" {
+		t.Fatalf("initial user events = (%+v, %v)", events, err)
+	}
+}
+
+func TestConcurrentInitialUserCreationHasOneWinner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "wispdeck.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var wait sync.WaitGroup
+	for _, username := range []string{"alice", "mallory"} {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			_, err := database.CreateInitialUser(ctx, username, "password-hash", "192.0.2.1", time.Now())
+			results <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	var succeeded, alreadyInitialized int
+	for err := range results {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, auth.ErrAlreadyInitialized):
+			alreadyInitialized++
+		default:
+			t.Fatalf("unexpected concurrent creation error: %v", err)
+		}
+	}
+	if succeeded != 1 || alreadyInitialized != 1 {
+		t.Fatalf("concurrent results: succeeded=%d already_initialized=%d", succeeded, alreadyInitialized)
+	}
+}
 
 func TestManagedUserLifecycleAndLastSuperuserInvariant(t *testing.T) {
 	ctx := context.Background()

@@ -2,7 +2,7 @@
 <html lang="en" class="no-js">
 <head>
   {{template "head_assets"}}
-  <title>Settings — Wispdeck</title>
+  <title>Settings — {{brand}}</title>
 </head>
 <body>
   {{template "app_header" .Shell}}
@@ -13,8 +13,53 @@
     </div>
 
 	<div class="panel-card">
+	  {{if .IsSuperuser}}
+	  <div id="branding" class="card-title">Branding</div>
+	  <p class="card-sub">Set the public-facing identity for this instance. Wispdeck’s product name remains visible where software or update identity matters.</p>
+	  {{if .BrandingSaved}}<div class="notice compact-notice" role="status">Branding saved. Open the front page to see the complete public view.</div>{{end}}
+	  {{if .BrandingError}}<p class="error" role="alert">{{.BrandingError}}</p>{{end}}
+	  <form class="settings-form" action="/settings/branding" method="post">
+	    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+	    <div class="settings-form-grid">
+	      <label class="field">Instance name
+	        <input name="instance_name" value="{{.Branding.Name}}" maxlength="48" autocomplete="off" required>
+	        <span class="helper">Shown in navigation, page titles, sign-in screens and public placeholders.</span>
+	      </label>
+	      <label class="field">Tagline
+	        <input name="tagline" value="{{.Branding.Tagline}}" maxlength="160" autocomplete="off" required>
+	        <span class="helper">The headline on your public front page and sign-in screen.</span>
+	      </label>
+	    </div>
+	    <fieldset class="accent-fieldset">
+	      <legend>Accent colour</legend>
+	      <div class="accent-options">
+	        {{range .BrandingAccents}}
+	        <label class="accent-option">
+	          <input type="radio" name="accent" value="{{.ID}}"{{if eq $.Branding.Accent .ID}} checked{{end}} required>
+	          <span class="accent-swatch accent-{{.ID}}" aria-hidden="true"></span>
+	          <span>{{.Label}}</span>
+	        </label>
+	        {{end}}
+	      </div>
+	    </fieldset>
+	    <label class="radio-option">
+	      <input type="checkbox" name="landing_page_enabled" value="true"{{if .Branding.LandingPageEnabled}} checked{{end}}>
+	      <span>
+	        <strong>Show public landing page</strong>
+	        <small>When disabled, signed-out visitors to the root address go straight to sign in. Public links and sites are unaffected.</small>
+	      </span>
+	    </label>
+	    <div><button type="submit" class="btn">Save branding</button></div>
+	  </form>
+	  {{else}}
+	  <div class="card-title">Branding</div>
+	  <p class="card-sub">This instance is named <strong>{{.Branding.Name}}</strong>. Superusers can change its public identity.</p>
+	  {{end}}
+	</div>
+
+	<div class="panel-card">
 	  <div class="card-title">Instance limits</div>
-	  <p class="card-sub">Storage and resource ceilings configured by this Wispdeck operator.</p>
+	  <p class="card-sub">Storage and resource ceilings configured by this {{brand}} operator.</p>
 	  <dl class="kv limit-grid">
 		<div><dt>short-link names</dt><dd>{{.MaxLinks}} reserved per user</dd></div>
 		<div><dt>hosted sites</dt><dd>{{.MaxSites}} per user</dd></div>
@@ -81,7 +126,7 @@
       <p class="card-sub">Create accounts, hand out one-use setup links, and manage roles for this instance.</p>
       <div class="card-rows">
         <div>
-          <span>Everyone with access to this Wispdeck installation</span>
+          <span>Everyone with access to this {{brand}} installation</span>
           <span class="row-note"><a href="/settings/users">Manage users</a></span>
         </div>
       </div>

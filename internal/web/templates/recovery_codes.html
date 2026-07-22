@@ -2,15 +2,14 @@
 <html lang="en" class="no-js">
 <head>
   {{template "head_assets"}}
-  <title>Recovery codes — Wispdeck</title>
+  <title>Recovery codes — {{brand}}</title>
   <script src="/assets/webauthn.js" defer></script>
 </head>
 <body>
   <main class="auth-main">
     <div class="auth-box">
       <a class="brand" href="/">
-        <span class="brand-mark" aria-hidden="true">w</span>
-        <span>Wispdeck</span>
+        {{template "brand_identity"}}
       </a>
       <div class="auth-card on-card">
         <div>

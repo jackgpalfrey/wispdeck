@@ -1,0 +1,51 @@
+{{define "onboarding.html"}}<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  {{template "head_assets"}}
+  <title>Set up Wispdeck</title>
+</head>
+<body>
+  <main class="auth-main">
+    <div class="auth-box onboarding-box">
+      <div class="onboarding-brand-row">
+        <span class="brand">
+          {{template "brand_identity"}}
+        </span>
+        {{template "theme_button"}}
+      </div>
+      <div class="auth-card on-card">
+        <div class="onboarding-intro">
+          <span class="onboarding-kicker">First run</span>
+          <h1>Welcome to Wispdeck</h1>
+          <p class="auth-sub">Secure this installation by creating its first superuser. You’ll configure passkeys or an authenticator next.</p>
+        </div>
+        <ol class="onboarding-steps" aria-label="Setup progress">
+          <li class="current"><span>1</span>Administrator</li>
+          <li><span>2</span>Authentication</li>
+          <li><span>3</span>Ready</li>
+        </ol>
+        {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+        <form action="/onboarding" method="post">
+          <label class="field">Setup code
+            <input name="setup_code" type="text" class="setup-code-input" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" inputmode="text" minlength="6" maxlength="6" required autofocus>
+            <span class="helper">Enter the six-character code shown in the server terminal.</span>
+          </label>
+          <div class="onboarding-divider"><span>Administrator account</span></div>
+          <label class="field">Username
+            <input name="username" value="{{.Username}}" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="64" pattern="[a-z0-9][a-z0-9._-]*" required>
+          </label>
+          <label class="field">Password
+            <input name="password" type="password" autocomplete="new-password" minlength="15" maxlength="1024" required>
+            <span class="helper">Use at least 15 characters. Compromised passwords are rejected.</span>
+          </label>
+          <label class="field">Confirm password
+            <input name="confirm_password" type="password" autocomplete="new-password" minlength="15" maxlength="1024" required>
+          </label>
+          <button type="submit" class="btn">Create superuser and continue</button>
+        </form>
+        <p class="onboarding-security">The setup code changes when the server restarts and stops working permanently as soon as this account is created.</p>
+      </div>
+    </div>
+  </main>
+</body>
+</html>{{end}}

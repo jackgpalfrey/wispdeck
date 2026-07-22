@@ -2,7 +2,7 @@
 <html lang="en" class="no-js">
 <head>
   {{template "head_assets"}}
-  <title>{{.Brand}} — short links and sites, self-hosted</title>
+  <title>{{.Brand}} — {{tagline}}</title>
 </head>
 <body>
   <header class="shell-header landing-header">
@@ -21,8 +21,8 @@
   <main class="landing-main">
     <div class="landing-hero">
       <p class="landing-eyebrow">self-hosted · open source · your data</p>
-      <h1>Short links,<br>your server, your rules.</h1>
-      <p class="lede">Wispdeck is a link shortener you run yourself. Custom slugs, expiring links, visit analytics — and lightweight static sites on your own subdomains.</p>
+      <h1>{{tagline}}</h1>
+      <p class="lede">{{brand}} is a link shortener you run yourself. Custom slugs, expiring links, visit analytics — and lightweight static sites on your own subdomains.</p>
       <form class="landing-form" action="/" method="get">
         <label class="sr-only" for="landing-url">URL to shorten</label>
         <input id="landing-url" name="shorten" type="url" inputmode="url" placeholder="https://paste-a-long-url.com/anything">

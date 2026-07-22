@@ -78,6 +78,7 @@ func TestNormalizeSlug(t *testing.T) {
 		{input: "not_ok", err: ErrInvalidSlug},
 		{input: "login", err: ErrReservedSlug},
 		{input: "healthz", err: ErrReservedSlug},
+		{input: "onboarding", err: ErrReservedSlug},
 		{input: "SECURITY", err: ErrReservedSlug},
 	}
 	for _, test := range tests {

@@ -54,19 +54,20 @@ type Limits struct {
 func DefaultLimits() Limits { return Limits{MaxLinksPerUser: DefaultMaxLinksPerUser} }
 
 var reservedSlugs = map[string]struct{}{
-	"account":  {},
-	"admin":    {},
-	"api":      {},
-	"assets":   {},
-	"data":     {},
-	"healthz":  {},
-	"links":    {},
-	"login":    {},
-	"logout":   {},
-	"security": {},
-	"settings": {},
-	"setup":    {},
-	"sites":    {},
+	"account":    {},
+	"admin":      {},
+	"api":        {},
+	"assets":     {},
+	"data":       {},
+	"healthz":    {},
+	"links":      {},
+	"login":      {},
+	"logout":     {},
+	"onboarding": {},
+	"security":   {},
+	"settings":   {},
+	"setup":      {},
+	"sites":      {},
 }
 
 type Mode string

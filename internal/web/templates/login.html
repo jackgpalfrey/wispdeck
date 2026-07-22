@@ -2,19 +2,18 @@
 <html lang="en" class="no-js">
 <head>
   {{template "head_assets"}}
-  <title>Sign in — Wispdeck</title>
+  <title>Sign in — {{brand}}</title>
 </head>
 <body>
   <main class="auth-main">
     <div class="auth-box">
       <a class="brand" href="/">
-        <span class="brand-mark" aria-hidden="true">w</span>
-        <span>Wispdeck</span>
+        {{template "brand_identity"}}
       </a>
       <div class="auth-card on-card">
         <div>
           <h1>Sign in</h1>
-          <p class="auth-sub">to this Wispdeck instance</p>
+          <p class="auth-sub">{{tagline}}</p>
         </div>
         <form action="/login" method="post">
           <label class="field">Username
@@ -27,7 +26,7 @@
           <button type="submit" class="btn">Sign in</button>
         </form>
       </div>
-      <p class="auth-foot"><a href="/">← back to the front page</a></p>
+      {{if landingEnabled}}<p class="auth-foot"><a href="/">← back to the front page</a></p>{{end}}
     </div>
   </main>
 </body>

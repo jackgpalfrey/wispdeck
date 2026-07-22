@@ -38,8 +38,8 @@ Development builds, prereleases, build metadata, and downgrades are rejected.
 ## Production preflight
 
 Run `doctor` as the same service account, with the same paths and origin flags
-that `serve` will use, before the first public start and after changing the
-deployment layout:
+that `serve` will use, after initial state has been bootstrapped and before the
+first public start, and again after changing the deployment layout:
 
 ```sh
 ./wispdeck doctor \
@@ -69,6 +69,22 @@ Wispdeck is directly exposed. `--json` provides a stable machine-readable
 report. `doctor` does not make network requests and therefore does not replace
 checks for DNS, certificates, reverse-proxy routing, manifest availability, or
 the live `/healthz` endpoint.
+
+## Fresh-install bootstrap
+
+If both the configured control database and authentication key are absent,
+`serve` creates them with service-account-only permissions. It logs an initial
+setup URL and a random six-character setup code, and the application origin
+redirects to that wizard until the first superuser is created. The code changes
+when an uninitialized server restarts. Treat it as a password and do not forward
+startup logs to an audience that should not control the installation.
+
+The key is generated only when the database path is absent. If a database
+exists without its original key, startup fails and requires restoration of a
+complete backup. This prevents a missing key from silently making encrypted
+credentials and peppered password hashes unusable. Operators who do not want a
+browser bootstrap can continue to run `auth-key generate` and `admin create`
+before `serve`.
 
 ## Tagged updates
 

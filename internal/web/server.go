@@ -19,9 +19,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wispdeck/wispdeck/internal/auth"
+	"github.com/wispdeck/wispdeck/internal/branding"
 	"github.com/wispdeck/wispdeck/internal/limit"
 	"github.com/wispdeck/wispdeck/internal/shortlink"
 	hostedsite "github.com/wispdeck/wispdeck/internal/site"
@@ -48,6 +50,7 @@ type Config struct {
 	Logger            *slog.Logger
 	PasswordChecker   auth.PasswordChecker
 	TrustedProxyCIDRs []string
+	InitialSetupCode  string
 }
 
 type Server struct {
@@ -58,6 +61,7 @@ type Server struct {
 	links                    *shortlink.Service
 	sites                    *hostedsite.Service
 	wispist                  *wispist.Engine
+	branding                 *branding.Service
 	updates                  *updater.Manager
 	passwordChecker          auth.PasswordChecker
 	limiter                  *limit.LoginLimiter
@@ -71,6 +75,8 @@ type Server struct {
 	previewViewCookieName    string
 	previewReturnCookieName  string
 	trustedProxies           []*net.IPNet
+	initialSetupCodeHash     [32]byte
+	initialized              atomic.Bool
 }
 
 type sessionContextKey struct{}
@@ -86,6 +92,7 @@ func New(
 	shortLinkService *shortlink.Service,
 	siteService *hostedsite.Service,
 	wispistEngine *wispist.Engine,
+	brandingService *branding.Service,
 	updateManager *updater.Manager,
 ) (*Server, error) {
 	siteDomain, previewDomain, err := ResolveOriginConfiguration(
@@ -96,16 +103,28 @@ func New(
 	}
 	config.SiteDomain = siteDomain
 	config.PreviewDomain = previewDomain
-	if authService == nil || passkeyService == nil || totpService == nil || shortLinkService == nil || siteService == nil || wispistEngine == nil {
-		return nil, errors.New("authentication, passkey, TOTP, short-link, site, and Wispist services are required")
+	if authService == nil || passkeyService == nil || totpService == nil || shortLinkService == nil ||
+		siteService == nil || wispistEngine == nil || brandingService == nil {
+		return nil, errors.New("authentication, passkey, TOTP, short-link, site, Wispist, and branding services are required")
 	}
 	if config.PasswordChecker == nil {
 		return nil, errors.New("password checker is required")
 	}
+	if config.InitialSetupCode != "" && !auth.ValidInitialSetupCode(config.InitialSetupCode) {
+		return nil, errors.New("initial setup code is invalid")
+	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
-	templates, err := template.ParseFS(files, "templates/*.html")
+	templates, err := template.New("templates").Funcs(template.FuncMap{
+		"brand": func() string { return brandingService.Current().Name },
+		"brandInitial": func() string {
+			return firstLetter(brandingService.Current().Name, "w")
+		},
+		"tagline":        func() string { return brandingService.Current().Tagline },
+		"accent":         func() string { return brandingService.Current().Accent },
+		"landingEnabled": func() bool { return brandingService.Current().LandingPageEnabled },
+	}).ParseFS(files, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse templates: %w", err)
 	}
@@ -113,6 +132,14 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+	initialized, err := authService.InstallationInitialized(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	if !initialized && !auth.ValidInitialSetupCode(config.InitialSetupCode) {
+		return nil, errors.New("valid initial setup code is required for an uninitialized installation")
+	}
+	config.InitialSetupCode = auth.NormalizeInitialSetupCode(config.InitialSetupCode)
 	s := &Server{
 		config:                   config,
 		auth:                     authService,
@@ -121,6 +148,7 @@ func New(
 		links:                    shortLinkService,
 		sites:                    siteService,
 		wispist:                  wispistEngine,
+		branding:                 brandingService,
 		updates:                  updateManager,
 		passwordChecker:          config.PasswordChecker,
 		limiter:                  limit.NewLoginLimiter(),
@@ -133,7 +161,9 @@ func New(
 		previewViewCookieName:    productionPreviewViewCookieName,
 		previewReturnCookieName:  productionPreviewReturnCookieName,
 		trustedProxies:           trustedProxies,
+		initialSetupCodeHash:     auth.TokenDigest(config.InitialSetupCode),
 	}
+	s.initialized.Store(initialized)
 	if config.Development {
 		s.cookieName = "wispdeck_session"
 		s.loginCookieName = "wispdeck_login"
@@ -208,6 +238,7 @@ func validSiteDomain(value string) bool {
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /assets/branding.css", s.brandingStylesheet)
 	mux.Handle("GET /assets/", s.assets())
 	mux.HandleFunc("GET /login", s.loginPage)
 	mux.HandleFunc("POST /login", s.login)
@@ -218,6 +249,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /login/totp", s.totpLogin)
 	mux.HandleFunc("POST /api/auth/passkey/login/begin", s.beginPasskeyLogin)
 	mux.HandleFunc("POST /api/auth/passkey/login/finish", s.finishPasskeyLogin)
+	mux.HandleFunc("GET /onboarding", s.onboardingPage)
+	mux.HandleFunc("POST /onboarding", s.completeOnboarding)
 	mux.HandleFunc("GET /{$}", s.home)
 	mux.Handle("POST /logout", s.requireSession(http.HandlerFunc(s.logout)))
 	mux.Handle("GET /links/{id}", s.requireSession(http.HandlerFunc(s.linkDetailPage)))
@@ -226,6 +259,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /sites/{name}/data", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.siteDataPage))))
 	mux.Handle("GET /sites/{name}/data/export", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.exportSiteData))))
 	mux.Handle("GET /settings", s.requireSession(http.HandlerFunc(s.settingsPage)))
+	mux.Handle("POST /settings/branding", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.changeBranding))))
 	mux.Handle("GET /settings/updates", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.updatesPage))))
 	mux.Handle("POST /settings/updates/mode", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.changeUpdateMode))))
 	mux.Handle("POST /settings/updates/check", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.checkForUpdates))))
@@ -269,7 +303,116 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /settings/users/setup-link", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.replaceUserSetupLink))))
 	mux.HandleFunc("GET /{slug}", s.resolvePublicName)
 	mux.HandleFunc("GET /{slug}/{rest...}", s.redirectSiteAlias)
-	return s.operationalBoundary(s.hostBoundary(s.securityBoundary(mux)))
+	return s.operationalBoundary(s.hostBoundary(s.securityBoundary(s.onboardingBoundary(mux))))
+}
+
+func (s *Server) onboardingBoundary(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.initialized.Load() || r.URL.Path == "/onboarding" ||
+			r.URL.Path == "/assets/branding.css" || strings.HasPrefix(r.URL.Path, "/assets/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		status := http.StatusFound
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			status = http.StatusSeeOther
+		}
+		http.Redirect(w, r, "/onboarding", status)
+	})
+}
+
+type onboardingView struct {
+	Username string
+	Error    string
+}
+
+func (s *Server) onboardingPage(w http.ResponseWriter, r *http.Request) {
+	if s.initialized.Load() {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	s.render(w, http.StatusOK, "onboarding.html", onboardingView{})
+}
+
+func (s *Server) completeOnboarding(w http.ResponseWriter, r *http.Request) {
+	if s.initialized.Load() {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	if !s.validBrowserOrigin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	username := auth.NormalizeUsername(r.PostForm.Get("username"))
+	clientIP := s.clientAddress(r)
+	submittedSetupCode := auth.NormalizeInitialSetupCode(r.PostForm.Get("setup_code"))
+	actualTokenHash := auth.TokenDigest(submittedSetupCode)
+	if !s.limiter.Allow("initial-setup", clientIP) {
+		s.render(w, http.StatusTooManyRequests, "onboarding.html", onboardingView{
+			Username: username, Error: "Too many setup attempts. Wait a minute and try again.",
+		})
+		return
+	}
+	if !auth.ValidInitialSetupCode(submittedSetupCode) ||
+		subtle.ConstantTimeCompare(actualTokenHash[:], s.initialSetupCodeHash[:]) != 1 {
+		s.render(w, http.StatusUnauthorized, "onboarding.html", onboardingView{
+			Username: username, Error: "The setup code is incorrect.",
+		})
+		return
+	}
+	password := r.PostForm.Get("password")
+	if password != r.PostForm.Get("confirm_password") {
+		s.render(w, http.StatusBadRequest, "onboarding.html", onboardingView{
+			Username: username, Error: "Passwords do not match.",
+		})
+		return
+	}
+	user, err := s.auth.CreateInitialSuperuser(
+		r.Context(), username, password, s.passwordChecker,
+		auth.PasswordContext{Service: "wispdeck", Domain: s.config.AppOrigin.Hostname()},
+		clientIP,
+	)
+	if err != nil {
+		if errors.Is(err, auth.ErrAlreadyInitialized) {
+			s.initialized.Store(true)
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		if errors.Is(err, auth.ErrInvalidUsername) ||
+			errors.Is(err, auth.ErrCompromisedPassword) ||
+			errors.Is(err, auth.ErrPasswordCheckFailed) ||
+			errors.Is(err, auth.ErrPasswordTooShort) ||
+			errors.Is(err, auth.ErrPasswordTooLong) ||
+			errors.Is(err, auth.ErrPasswordInvalid) {
+			message := passwordErrorMessage(err, "Choose a valid username and password.")
+			if errors.Is(err, auth.ErrInvalidUsername) {
+				message = err.Error()
+			}
+			s.render(w, http.StatusBadRequest, "onboarding.html", onboardingView{
+				Username: username, Error: message,
+			})
+			return
+		}
+		s.config.Logger.ErrorContext(r.Context(), "complete initial onboarding", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	s.initialized.Store(true)
+	token, _, err := s.auth.NewSession(
+		r.Context(), user, auth.AssuranceBootstrap, clientIP, r.UserAgent(),
+	)
+	if err != nil {
+		s.config.Logger.ErrorContext(r.Context(), "start initial administrator session", "error", err)
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	s.setSessionCookie(w, token)
+	http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
 }
 
 // operationalBoundary exposes only non-sensitive process state. Direct
@@ -315,6 +458,29 @@ func (s *Server) assets() http.Handler {
 		panic(err)
 	}
 	return http.StripPrefix("/assets/", http.FileServer(http.FS(assets)))
+}
+
+func (s *Server) brandingStylesheet(w http.ResponseWriter, r *http.Request) {
+	accent, ok := branding.AccentByID(s.branding.Current().Accent)
+	if !ok {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	body := []byte(":root { --accbg: " + accent.Hex + "; }\n")
+	digest := sha256.Sum256(body)
+	etag := `"` + hex.EncodeToString(digest[:]) + `"`
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write(body)
 }
 
 func (s *Server) securityBoundary(next http.Handler) http.Handler {

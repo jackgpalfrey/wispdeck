@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
-  <title>{{if .Draft}}Draft site{{else}}Site reserved{{end}} — Wispdeck</title>
+  <title>{{if .Draft}}Draft site{{else}}Site reserved{{end}} — {{brand}}</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -17,6 +17,13 @@
         --mut: #a8a294; --fnt: #6f6a5c; --acc: #8aa894; --acc-text: #1a1915;
       }
     }
+    body.accent-forest { --acc: #3f6b4f; --acc-text: #ffffff; }
+    body.accent-ocean { --acc: #315f8c; --acc-text: #ffffff; }
+    body.accent-teal { --acc: #27736b; --acc-text: #ffffff; }
+    body.accent-violet { --acc: #684f8c; --acc-text: #ffffff; }
+    body.accent-rose { --acc: #8c455c; --acc-text: #ffffff; }
+    body.accent-ember { --acc: #94532f; --acc-text: #ffffff; }
+    body.accent-slate { --acc: #485363; --acc-text: #ffffff; }
     body {
       display: grid; min-height: 100vh; margin: 0; padding: 1.5rem; box-sizing: border-box;
       place-items: center; background: var(--bg); color: var(--ink);
@@ -40,9 +47,9 @@
     small { display: block; margin-top: 0.9rem; color: var(--fnt); font-size: 0.75rem; }
   </style>
 </head>
-<body>
+<body class="accent-{{accent}}">
   <main>
-    <div class="mark" aria-hidden="true">w</div>
+    <div class="mark" aria-hidden="true">{{brandInitial}}</div>
     {{if .Draft}}
       <h1>This site is currently a draft</h1>
       <p><strong>{{.Name}}</strong> has not been published yet. Its owner can sign in to preview the draft.</p>

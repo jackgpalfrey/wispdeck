@@ -34,6 +34,49 @@ type UserSetup struct {
 	ExpiresAt time.Time
 }
 
+func (s *Service) InstallationInitialized(ctx context.Context) (bool, error) {
+	initialized, err := s.repository.InstallationInitialized(ctx)
+	if err != nil {
+		return false, fmt.Errorf("check installation initialization: %w", err)
+	}
+	return initialized, nil
+}
+
+// CreateInitialSuperuser creates the only account that may be created without
+// an authenticated actor. The repository enforces the empty-installation
+// precondition transactionally so concurrent setup submissions cannot both
+// succeed.
+func (s *Service) CreateInitialSuperuser(
+	ctx context.Context,
+	username, password string,
+	checker PasswordChecker,
+	passwordContext PasswordContext,
+	clientIP string,
+) (User, error) {
+	username = NormalizeUsername(username)
+	if err := ValidateUsername(username); err != nil {
+		return User{}, err
+	}
+	if err := ValidatePassword(password); err != nil {
+		return User{}, err
+	}
+	passwordContext.Username = username
+	if checker != nil {
+		if err := checker.Check(ctx, password, passwordContext); err != nil {
+			return User{}, err
+		}
+	}
+	hash, err := s.passwords.Hash(password)
+	if err != nil {
+		return User{}, fmt.Errorf("hash initial password: %w", err)
+	}
+	user, err := s.repository.CreateInitialUser(ctx, username, hash, clientIP, s.now().UTC())
+	if err != nil {
+		return User{}, err
+	}
+	return user, nil
+}
+
 func (s *Service) ListUsers(ctx context.Context, actor Session) ([]UserSummary, error) {
 	if !canManageUsers(actor) {
 		return nil, ErrForbidden

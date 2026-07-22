@@ -26,6 +26,25 @@ other users; the final active superuser is protected by a transactional
 database invariant. User status and role changes apply to existing sessions
 immediately.
 
+## Instance branding
+
+Superusers can set an instance name, a short public tagline, an accent from a
+curated palette, and whether signed-out visitors see the public landing page.
+When the landing page is disabled, only the root application address redirects
+to sign-in; public short links and hosted sites remain available. Branding is
+loaded into an in-process concurrency-safe cache at startup and persisted
+transactionally in the control database. Changes take effect immediately
+across the management interface, authentication screens,
+public short-link pages, and hosted-site draft or empty placeholders. The
+newest 1,000 branding-change audit snapshots are retained.
+
+Branding accepts plain single-line text only. Templates retain contextual HTML
+escaping, and colours are server-defined identifiers mapped to fixed accessible
+values. Wispdeck does not accept arbitrary CSS, HTML, uploaded logos, or remote
+asset URLs, avoiding script injection and third-party tracking. The Wispdeck
+software/update identity, WebAuthn relying-party boundary, and authenticator-app
+issuer remain stable when display branding changes.
+
 ## Short links
 
 Short-link names are globally unique within a deployment and contain only
@@ -167,7 +186,19 @@ ownership checks apply. The complete hosting and deployment contract is in
 
 ## Passwords and bootstrap
 
-- The initial superuser is created locally with `wispdeck admin create`.
+- On a genuinely fresh installation, `serve` creates the missing authentication
+  key and control database, then redirects application requests to
+  `/onboarding`.
+- The initial-superuser form requires a random six-character setup code printed
+  to the server terminal. The code is never rendered into the page, changes on
+  every uninitialized restart, is globally limited to five attempts per minute,
+  and is useful only while the user table is empty.
+- Initial-superuser creation checks the empty-user precondition and writes its
+  audit event in one transaction, so concurrent claims have exactly one winner.
+- Wispdeck never generates a replacement key for an existing database. A
+  missing key in that state is a restore failure, not a fresh installation.
+- `wispdeck auth-key generate` followed by `wispdeck admin create` remains an
+  offline alternative to browser onboarding.
 - Passwords are never accepted in command-line arguments or environment
   variables. Automation may provide them through standard input explicitly.
 - Passwords must contain 15 to 256 Unicode code points and may contain spaces.

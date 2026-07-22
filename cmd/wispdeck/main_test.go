@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,6 +80,38 @@ func TestGenerateAuthKey(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "Back it up securely") {
 		t.Fatalf("output = %q", output.String())
+	}
+}
+
+func TestServeKeyBootstrapOnlyGeneratesForMissingDatabase(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "state", "wispdeck.db")
+	keyPath := filepath.Join(root, "secrets", "auth.key")
+	generated, err := ensureServeInstallationKey(databasePath, keyPath)
+	if err != nil || !generated {
+		t.Fatalf("fresh key bootstrap = (%v, %v)", generated, err)
+	}
+	if _, err := auth.LoadInstallationKey(keyPath); err != nil {
+		t.Fatalf("generated key is not loadable: %v", err)
+	}
+	generated, err = ensureServeInstallationKey(databasePath, keyPath)
+	if err != nil || generated {
+		t.Fatalf("existing fresh key bootstrap = (%v, %v)", generated, err)
+	}
+
+	otherRoot := t.TempDir()
+	existingDatabase := filepath.Join(otherRoot, "wispdeck.db")
+	if err := os.WriteFile(existingDatabase, []byte("database state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingKey := filepath.Join(otherRoot, "auth.key")
+	if _, err := ensureServeInstallationKey(existingDatabase, missingKey); err == nil ||
+		!strings.Contains(err.Error(), "restore the original key") {
+		t.Fatalf("existing database without key error = %v", err)
+	}
+	if _, err := os.Stat(missingKey); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing key was unexpectedly created: %v", err)
 	}
 }
 

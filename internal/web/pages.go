@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wispdeck/wispdeck/internal/auth"
+	"github.com/wispdeck/wispdeck/internal/branding"
 	"github.com/wispdeck/wispdeck/internal/shortlink"
 	hostedsite "github.com/wispdeck/wispdeck/internal/site"
 	"github.com/wispdeck/wispdeck/internal/updater"
@@ -17,8 +18,6 @@ import (
 
 // shellView feeds the shared application header partial.
 type shellView struct {
-	Brand           string
-	Initial         string
 	Username        string
 	UserInitial     string
 	Tab             string
@@ -28,10 +27,7 @@ type shellView struct {
 }
 
 func (s *Server) shell(session auth.Session, tab string) shellView {
-	brand := s.config.SiteDomain
 	view := shellView{
-		Brand:       brand,
-		Initial:     firstLetter(brand, "w"),
 		Username:    session.User.Username,
 		UserInitial: firstLetter(session.User.Username, "?"),
 		Tab:         tab,
@@ -73,11 +69,16 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		}
 		s.clearSessionCookie(w)
 	}
+	currentBranding := s.branding.Current()
+	if !currentBranding.LandingPageEnabled {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
 	s.render(w, http.StatusOK, "landing.html", struct {
 		Brand      string
 		Initial    string
 		SiteDomain string
-	}{s.config.SiteDomain, firstLetter(s.config.SiteDomain, "w"), s.config.SiteDomain})
+	}{currentBranding.Name, firstLetter(currentBranding.Name, "w"), s.config.SiteDomain})
 }
 
 /* ---------- unified dashboard ---------- */
@@ -535,35 +536,52 @@ func (s *Server) newSitePage(w http.ResponseWriter, r *http.Request) {
 
 /* ---------- settings ---------- */
 
+type settingsView struct {
+	Shell             shellView
+	CSRFToken         string
+	Username          string
+	Role              auth.Role
+	AppHost           string
+	SiteDomain        string
+	PreviewDomain     string
+	IsSuperuser       bool
+	MaxLinks          int
+	MaxSites          int
+	MaxReleases       int
+	MaxSiteStorage    string
+	MaxWispistLive    string
+	MaxWispistDraft   string
+	UpdatesConfigured bool
+	UpdateAvailable   bool
+	UpdateVersion     string
+	Branding          branding.Settings
+	BrandingAccents   []branding.Accent
+	BrandingSaved     bool
+	BrandingError     string
+}
+
 func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 	session := sessionFromContext(r.Context())
 	if !managedAssurance(session) {
 		http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
 		return
 	}
+	s.renderSettings(w, r, http.StatusOK, s.branding.Current(), "")
+}
+
+func (s *Server) renderSettings(
+	w http.ResponseWriter,
+	r *http.Request,
+	status int,
+	brandSettings branding.Settings,
+	brandingError string,
+) {
+	session := sessionFromContext(r.Context())
 	updateSnapshot := updater.Snapshot{}
 	if s.updates != nil {
 		updateSnapshot = s.updates.Snapshot()
 	}
-	s.render(w, http.StatusOK, "settings.html", struct {
-		Shell             shellView
-		CSRFToken         string
-		Username          string
-		Role              auth.Role
-		AppHost           string
-		SiteDomain        string
-		PreviewDomain     string
-		IsSuperuser       bool
-		MaxLinks          int
-		MaxSites          int
-		MaxReleases       int
-		MaxSiteStorage    string
-		MaxWispistLive    string
-		MaxWispistDraft   string
-		UpdatesConfigured bool
-		UpdateAvailable   bool
-		UpdateVersion     string
-	}{
+	s.render(w, status, "settings.html", settingsView{
 		Shell:     s.shell(session, "settings"),
 		CSRFToken: session.CSRFToken,
 		Username:  session.User.Username,
@@ -580,7 +598,44 @@ func (s *Server) settingsPage(w http.ResponseWriter, r *http.Request) {
 		UpdatesConfigured: updateSnapshot.Configured,
 		UpdateAvailable:   updateSnapshot.Available,
 		UpdateVersion:     updateSnapshot.Latest.Version,
+		Branding:          brandSettings,
+		BrandingAccents:   branding.Accents(),
+		BrandingSaved:     r.URL.Query().Get("branding") == "saved",
+		BrandingError:     brandingError,
 	})
+}
+
+func (s *Server) changeBranding(w http.ResponseWriter, r *http.Request) {
+	session := sessionFromContext(r.Context())
+	if !s.validBrowserOrigin(r) || !validCSRF(w, r, session.CSRFToken) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	landingPageEnabled := r.PostForm.Get("landing_page_enabled")
+	settings := branding.Settings{
+		Name: r.PostForm.Get("instance_name"), Tagline: r.PostForm.Get("tagline"),
+		Accent: r.PostForm.Get("accent"), LandingPageEnabled: landingPageEnabled == "true",
+	}
+	if landingPageEnabled != "" && landingPageEnabled != "true" {
+		s.renderSettings(w, r, http.StatusBadRequest, settings, "Choose whether to show the public landing page.")
+		return
+	}
+	normalized, err := branding.Normalize(settings)
+	if err != nil {
+		s.renderSettings(
+			w, r, http.StatusBadRequest, settings,
+			"Use a one-line name up to 48 characters, a one-line tagline up to 160 characters, and one of the available colours.",
+		)
+		return
+	}
+	if _, err := s.branding.Update(r.Context(), normalized, branding.Actor{
+		UserID: session.User.ID, Username: session.User.Username, ClientIP: s.clientAddress(r),
+	}); err != nil {
+		s.config.Logger.ErrorContext(r.Context(), "change instance branding", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/settings?branding=saved#branding", http.StatusSeeOther)
 }
 
 /* ---------- shared helpers ---------- */

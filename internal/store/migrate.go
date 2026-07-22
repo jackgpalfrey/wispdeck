@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const SchemaVersion = 11
+const SchemaVersion = 13
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
@@ -75,6 +75,14 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err := migrationEleven(ctx, tx); err != nil {
 				return err
 			}
+		case 12:
+			if err := migrationTwelve(ctx, tx); err != nil {
+				return err
+			}
+		case 13:
+			if err := migrationThirteen(ctx, tx); err != nil {
+				return err
+			}
 		}
 		version++
 		if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
@@ -86,6 +94,55 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrationThirteen(ctx context.Context, tx *sql.Tx) error {
+	const schema = `
+		ALTER TABLE branding_settings ADD COLUMN landing_page_enabled INTEGER NOT NULL DEFAULT 1
+			CHECK(landing_page_enabled IN (0, 1));
+		ALTER TABLE branding_events ADD COLUMN landing_page_enabled INTEGER NOT NULL DEFAULT 1
+			CHECK(landing_page_enabled IN (0, 1));
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 13: %w", err)
+	}
+	return nil
+}
+
+func migrationTwelve(ctx context.Context, tx *sql.Tx) error {
+	const schema = `
+		CREATE TABLE branding_settings (
+			singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+			instance_name TEXT NOT NULL DEFAULT '' CHECK(length(instance_name) <= 48),
+			tagline TEXT NOT NULL DEFAULT '' CHECK(length(tagline) <= 160),
+			accent TEXT NOT NULL CHECK(accent IN (
+				'forest', 'ocean', 'teal', 'violet', 'rose', 'ember', 'slate'
+			)),
+			updated_at INTEGER NOT NULL,
+			updated_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL
+		) STRICT;
+		INSERT INTO branding_settings (
+			singleton, instance_name, tagline, accent, updated_at
+		) VALUES (1, '', '', 'forest', 0);
+
+		CREATE TABLE branding_events (
+			id INTEGER PRIMARY KEY,
+			occurred_at INTEGER NOT NULL,
+			actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+			actor_username TEXT NOT NULL CHECK(length(actor_username) <= 64),
+			client_ip TEXT NOT NULL CHECK(length(client_ip) <= 128),
+			instance_name TEXT NOT NULL CHECK(length(instance_name) BETWEEN 1 AND 48),
+			tagline TEXT NOT NULL CHECK(length(tagline) BETWEEN 1 AND 160),
+			accent TEXT NOT NULL CHECK(accent IN (
+				'forest', 'ocean', 'teal', 'violet', 'rose', 'ember', 'slate'
+			))
+		) STRICT;
+		CREATE INDEX branding_events_time ON branding_events(occurred_at DESC, id DESC);
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 12: %w", err)
 	}
 	return nil
 }

@@ -14,6 +14,25 @@ type memoryRepository struct {
 	events   []AuthEvent
 }
 
+func (r *memoryRepository) InstallationInitialized(context.Context) (bool, error) {
+	return r.user.ID != "", nil
+}
+
+func (r *memoryRepository) CreateInitialUser(
+	_ context.Context,
+	username, passwordHash, _ string,
+	now time.Time,
+) (User, error) {
+	if r.user.ID != "" {
+		return User{}, ErrAlreadyInitialized
+	}
+	r.user = User{
+		ID: "initial-user", Username: username, PasswordHash: passwordHash,
+		Role: RoleSuperuser, Status: UserActive, CreatedAt: now, UpdatedAt: now,
+	}
+	return r.user, nil
+}
+
 func (r *memoryRepository) UserByUsername(_ context.Context, username string) (User, error) {
 	if username != r.user.Username {
 		return User{}, ErrUserNotFound
