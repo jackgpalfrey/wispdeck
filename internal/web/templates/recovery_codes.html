@@ -1,22 +1,29 @@
 {{define "recovery_codes.html"}}<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{template "head_assets"}}
   <title>Recovery codes — Wispdeck</title>
-  <link rel="stylesheet" href="/assets/admin.css">
   <script src="/assets/webauthn.js" defer></script>
 </head>
 <body>
-  <main class="panel wide">
-    <h1>Save these recovery codes</h1>
-    <p>Previous codes are now invalid. Each new code works once and will not be shown again.</p>
-    <ol id="recovery-code-list" class="codes">
-      {{range .Codes}}<li><code>{{.}}</code></li>{{end}}
-    </ol>
-    <button type="button" class="secondary" data-copy-codes>Copy codes</button>
-    <p><a href="/security/passkeys">I have saved them</a></p>
+  <main class="auth-main">
+    <div class="auth-box">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">w</span>
+        <span>Wispdeck</span>
+      </a>
+      <div class="auth-card on-card">
+        <div>
+          <h1>Save these recovery codes</h1>
+          <p class="auth-sub">Previous codes are now invalid. Each new code works once and will not be shown again.</p>
+        </div>
+        <ol id="recovery-code-list" class="codes">
+          {{range .Codes}}<li><code>{{.}}</code></li>{{end}}
+        </ol>
+        <button type="button" class="btn quiet" data-copy-codes>Copy codes</button>
+      </div>
+      <p class="auth-foot"><a href="/security/passkeys">I have saved them</a></p>
+    </div>
   </main>
 </body>
 </html>{{end}}
-

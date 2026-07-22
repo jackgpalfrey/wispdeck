@@ -30,33 +30,34 @@ func TestSiteReleasePublicationPreviewAndGlobalNames(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	created, err := database.CreateSite(ctx, alice.ID, "notes", "Private notes site", now)
+	limits := site.DefaultLimits()
+	created, err := database.CreateSite(ctx, alice.ID, "notes", "Private notes site", limits, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.CreateShortLink(ctx, alice.ID, shortlink.Link{
 		Slug: "notes", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, now); !errors.Is(err, shortlink.ErrSlugUnavailable) {
+	}, shortlink.DefaultLimits(), now); !errors.Is(err, shortlink.ErrSlugUnavailable) {
 		t.Fatalf("link using site name error = %v", err)
 	}
 	if _, err := database.CreateShortLink(ctx, alice.ID, shortlink.Link{
 		Slug: "other", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, now); err != nil {
+	}, shortlink.DefaultLimits(), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.CreateSite(ctx, alice.ID, "other", "", now); !errors.Is(err, site.ErrNameUnavailable) {
+	if _, err := database.CreateSite(ctx, alice.ID, "other", "", limits, now); !errors.Is(err, site.ErrNameUnavailable) {
 		t.Fatalf("site using link name error = %v", err)
 	}
 
 	bundleOne := testBundle(map[string]string{
 		"index.html": "<h1>one</h1>", "app.js": "one()",
 	})
-	if _, err := database.CreateSiteRelease(ctx, bob.ID, false, created.ID, bundleOne, now.Add(time.Minute)); !errors.Is(err, site.ErrNotFound) {
+	if _, err := database.CreateSiteRelease(ctx, bob.ID, false, created.ID, bundleOne, limits, now.Add(time.Minute)); !errors.Is(err, site.ErrNotFound) {
 		t.Fatalf("cross-owner upload error = %v", err)
 	}
-	releaseOne, err := database.CreateSiteRelease(ctx, alice.ID, false, created.ID, bundleOne, now.Add(time.Minute))
+	releaseOne, err := database.CreateSiteRelease(ctx, alice.ID, false, created.ID, bundleOne, limits, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +118,7 @@ func TestSiteReleasePublicationPreviewAndGlobalNames(t *testing.T) {
 	}
 
 	bundleTwo := testBundle(map[string]string{"index.html": "<h1>two</h1>"})
-	releaseTwo, err := database.CreateSiteRelease(ctx, alice.ID, false, created.ID, bundleTwo, now.Add(4*time.Minute))
+	releaseTwo, err := database.CreateSiteRelease(ctx, alice.ID, false, created.ID, bundleTwo, limits, now.Add(4*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +146,78 @@ func TestSiteReleasePublicationPreviewAndGlobalNames(t *testing.T) {
 	sites, err := database.Sites(ctx, alice.ID, false)
 	if err != nil || len(sites) != 1 || len(sites[0].Releases) != 2 || sites[0].Releases[0].Version != 2 {
 		t.Fatalf("managed sites = (%#v, %v)", sites, err)
+	}
+	usage, err := database.SiteUsage(ctx, alice.ID, false, created.ID)
+	if err != nil || usage.SiteReleases != 2 || usage.OwnerSites != 1 || usage.SiteBytes != bundleOne.TotalBytes+bundleTwo.TotalBytes {
+		t.Fatalf("site usage = (%+v, %v)", usage, err)
+	}
+	if err := database.DeleteSiteRelease(ctx, alice.ID, false, created.ID, releaseOne.ID, now.Add(7*time.Minute)); !errors.Is(err, site.ErrSelectedRelease) {
+		t.Fatalf("selected release deletion error = %v", err)
+	}
+	if err := database.DeleteSiteRelease(ctx, alice.ID, false, created.ID, releaseTwo.ID, now.Add(7*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PurgeSiteContent(ctx, alice.ID, false, created.ID, now.Add(8*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	sites, err = database.Sites(ctx, alice.ID, false)
+	if err != nil || len(sites) != 1 || sites[0].Enabled || len(sites[0].Releases) != 0 ||
+		sites[0].DraftReleaseID != "" || sites[0].PublishedReleaseID != "" {
+		t.Fatalf("purged site = (%#v, %v)", sites, err)
+	}
+	if _, err := database.CreateSite(ctx, alice.ID, "notes", "replacement", limits, now.Add(9*time.Minute)); !errors.Is(err, site.ErrNameUnavailable) {
+		t.Fatalf("purged name was released: %v", err)
+	}
+	republished, err := database.CreateSiteRelease(ctx, alice.ID, false, created.ID, bundleTwo, limits, now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PublishSiteRelease(ctx, alice.ID, false, created.ID, republished.ID, now.Add(11*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetSiteEnabled(ctx, alice.ID, false, created.ID, true, now.Add(12*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = database.SiteByName(ctx, "notes")
+	if err != nil || !loaded.Enabled || loaded.PublishedReleaseID != republished.ID {
+		t.Fatalf("republished purged site = (%+v, %v)", loaded, err)
+	}
+}
+
+func TestSiteQuotasAreEnforcedAtomically(t *testing.T) {
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "wispdeck.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	owner, err := database.CreateUser(ctx, "owner", "hash", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := site.Limits{MaxSitesPerUser: 1, MaxReleasesPerSite: 2, MaxStorageBytesPerUser: 1 << 20}
+	created, err := database.CreateSite(ctx, owner.ID, "one", "", limits, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreateSite(ctx, owner.ID, "two", "", limits, now); !errors.Is(err, site.ErrSiteLimit) {
+		t.Fatalf("site quota error = %v", err)
+	}
+	bundle := testBundle(map[string]string{"index.html": "one"})
+	for range 2 {
+		if _, err := database.CreateSiteRelease(ctx, owner.ID, false, created.ID, bundle, limits, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.CreateSiteRelease(ctx, owner.ID, false, created.ID, bundle, limits, now); !errors.Is(err, site.ErrReleaseLimit) {
+		t.Fatalf("release quota error = %v", err)
+	}
+	storageLimits := limits
+	storageLimits.MaxReleasesPerSite = 3
+	storageLimits.MaxStorageBytesPerUser = bundle.TotalBytes * 2
+	if _, err := database.CreateSiteRelease(ctx, owner.ID, false, created.ID, bundle, storageLimits, now); !errors.Is(err, site.ErrStorageLimit) {
+		t.Fatalf("storage quota error = %v", err)
 	}
 }
 

@@ -168,6 +168,7 @@ func TestMigrationsInvalidatePasswordOnlySessionsAndReachCurrentSchema(t *testin
 		"short_link_destinations", "short_link_daily_stats", "short_link_audit_events",
 		"public_names", "sites", "site_releases", "site_files",
 		"site_preview_grants", "site_preview_sessions", "site_audit_events",
+		"update_settings", "update_events",
 	} {
 		if err := database.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count); err != nil {
 			t.Fatalf("schema v7 table %s missing: %v", table, err)
@@ -176,8 +177,81 @@ func TestMigrationsInvalidatePasswordOnlySessionsAndReachCurrentSchema(t *testin
 	if err := database.db.QueryRow(`SELECT version FROM schema_version`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != schemaVersion {
-		t.Fatalf("schema version = %d, want %d", count, schemaVersion)
+	if count != SchemaVersion {
+		t.Fatalf("schema version = %d, want %d", count, SchemaVersion)
+	}
+}
+
+func TestMigrationTenPreservesAuditAndContinuesReleaseVersions(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "wispdeck.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range []func(context.Context, *sql.Tx) error{
+		migrationOne, migrationTwo, migrationThree, migrationFour, migrationFive,
+		migrationSix, migrationSeven, migrationEight, migrationNine,
+	} {
+		if err := migration(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userID := "11111111111111111111111111111111"
+	siteID := "22222222222222222222222222222222"
+	releaseID := "33333333333333333333333333333333"
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO users (
+			id, username, password_hash, created_at, updated_at, mfa_skipped, role, status
+		) VALUES (?, 'alice', 'hash', 100, 100, 0, 'superuser', 'active')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO sites (id, owner_user_id, name, title, enabled, created_at, updated_at)
+		VALUES (?, ?, 'notes', '', 1, 100, 100)`, siteID, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO site_releases (
+			id, site_id, version, created_by_user_id, file_count, total_bytes,
+			bundle_digest, created_at
+		) VALUES (?, ?, 7, ?, 1, 10, ?, 100)`, releaseID, siteID, userID, make([]byte, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO site_audit_events (
+			occurred_at, actor_user_id, owner_user_id, site_id, name, kind
+		) VALUES (100, ?, ?, ?, 'notes', 'published')`, userID, userID, siteID); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrationTen(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO site_audit_events (
+			occurred_at, actor_user_id, owner_user_id, site_id, name, kind
+		) VALUES (101, ?, ?, ?, 'notes', 'release_deleted')`, userID, userID, siteID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var nextVersion, auditCount int
+	if err := db.QueryRowContext(ctx, `SELECT next_release_version FROM sites WHERE id = ?`, siteID).Scan(&nextVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM site_audit_events WHERE site_id = ?`, siteID).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if nextVersion != 8 || auditCount != 2 {
+		t.Fatalf("migration result = next version %d, audit events %d", nextVersion, auditCount)
 	}
 }
 

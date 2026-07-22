@@ -71,12 +71,37 @@ origin; they never serve uploaded bytes.
 
 The only accepted workload is a pre-built static ZIP bundle. Archive ingestion
 rejects traversal, absolute and non-canonical paths, backslashes, symlinks,
-encrypted entries, case-insensitive path collisions, reserved `/_wispdeck/`
-paths, missing root `index.html`, and configured size/count limit violations.
+encrypted entries, case-insensitive path collisions, reserved `/_wispdeck/` and
+`/_wispist/` paths, missing root `index.html`, and configured size/count limit
+violations.
 File and bundle digests are recalculated before storage. Releases and files are
 immutable; publishing and rollback only switch the site's release pointer in a
 transaction. There is no executable server-side site code or per-site idle
 process.
+
+Per-user site and link counts, per-site retained releases, and per-user release
+bytes are enforced transactionally. An older release may be deleted only when
+it is not selected as either the public or draft release. Erasing a site first
+disables it and invalidates preview authority, then removes releases and both
+Wispist namespaces. The global public-name record is retained for the original
+owner, so cleanup cannot enable a dangling-link takeover.
+
+Wispist data management is served only from the authenticated application
+origin. Document replacement uses the stored revision as an optimistic
+precondition; a stale management page cannot overwrite a newer site mutation.
+Collection clearing produces retained delete changes for active clients. A
+full namespace purge also removes prior change and idempotency records and
+resets live streams, preventing pre-purge cursors from silently continuing.
+
+Hosted JavaScript may access only collections declared by the active release's
+strict `wispist.json`. Wispist enforces that policy, exact-origin checks for
+mutations, optimistic concurrency, storage quotas, request rates, bounded live
+streams, and separate live/draft namespaces on the server. The declaration and
+browser client contain no secret. The built-in `shared` policy deliberately
+grants every visitor read and write access; rate limits reduce abuse but do not
+turn that choice into user authorization. Wispist data is stored in per-site
+SQLite files outside the control database and has no per-site process, timer, or
+connection after its bounded cache entry becomes idle.
 
 Every hosted name has its own public content origin, and every preview grant has
 a fresh unguessable content origin. The application, public content, and preview
@@ -88,6 +113,37 @@ payload, but it also cannot access application responses through the same-origin
 policy. Application mutations continue to require exact-origin validation and a
 session-bound CSRF token; sibling subdomains are not trusted merely because
 they are same-site.
+
+The application origin exposes an unauthenticated `/healthz` endpoint containing
+only a constant process-ready response. Direct loopback requests can reach the
+same check for post-update verification. Content origins do not receive this
+operational route; their `/healthz` path remains hosted content.
+
+## Release updates
+
+The updater accepts only strictly increasing stable `vMAJOR.MINOR.PATCH`
+versions from a bounded, Ed25519-signed manifest. The release public key and
+manifest URL are embedded in a production binary or explicitly configured
+together by the operator. The signed payload fixes each supported platform's
+HTTPS URL, byte length, and SHA-256 digest. Downloads are size bounded,
+checksummed while streaming into an owner-only directory, and executed only to
+confirm their signed version before activation. A compromised download host or
+manifest host cannot publish code without the signing key; compromise of the
+signing key is equivalent to trusted code-signing compromise.
+
+Only superusers can change update policy or request an installation, and the
+same exact-origin, session, CSRF, and password-or-MFA administration gate used
+elsewhere remains in force. Notify is the default policy. Update settings and
+user-initiated actions are audited without storing release payloads.
+
+Activation begins only after a graceful server shutdown. It takes a complete
+state backup under the installation lock, uses a Linux atomic file exchange,
+and writes a durable recovery marker around the exchange. The new process must
+bind its listener and answer the local constant `/healthz` probe before the old
+binary is discarded. Startup failure or an interrupted activation restores the
+old executable and matching pre-update state. Release signing, key rotation,
+filesystem requirements, and recovery behavior are specified in
+`operations.md`.
 
 Uploads begin as drafts. An unauthenticated public site origin exposes only a
 generic login gate. Preview authorization crosses origins through a two-minute,
@@ -155,18 +211,19 @@ normalized username and client address using bounded, in-memory sliding
 windows. Wispdeck does not trust forwarding headers unless deployment
 configuration explicitly identifies a trusted proxy. TOTP login, TOTP
 enrollment, and recovery attempts are separately limited; recovery codes
-contain 128 random bits.
+contain 128 random bits. Password checks for unknown usernames still use the
+dummy hash but do not create database audit rows. Real-account failures are
+audited. Expired authentication state is pruned periodically, and audit events
+have configurable age and record-count bounds.
 
 ## Out of scope for this slice
 
 - TLS termination and reverse-proxy configuration
-- Data API authorization
 - Server-side site code, build execution, and runtime sandboxing
 - Custom domains
-- Per-owner storage quotas and automated abuse controls
+- Per-owner aggregate quotas across links and sites
 - Email or support-mediated account recovery
 - Distributed rate limiting
-- Configurable audit-log retention policy
 
 These are not assumed safe by the authentication implementation and must be
 designed before their corresponding feature is exposed.

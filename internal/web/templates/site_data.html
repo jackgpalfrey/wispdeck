@@ -1,0 +1,140 @@
+{{define "site_data.html"}}<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  {{template "head_assets"}}
+  <title>Data · {{.Host}} — Wispdeck</title>
+</head>
+<body>
+  {{template "app_header" .Shell}}
+
+  <main class="page w-detail">
+    <a class="backlink" href="/sites/{{.SiteName}}">← {{.Host}}</a>
+
+    <div class="detail-head">
+      <span class="detail-title">Site data</span>
+      <span class="pill live">Wispist</span>
+      <span class="spacer"></span>
+      <a class="btn quiet compact" href="{{.ExportURL}}">Export all data</a>
+    </div>
+    <div class="detail-sub">Inspect and repair the persistent data used by this hosted site.</div>
+
+    <div class="detail-stats">
+      <div><span class="n">{{.Usage}}</span> {{.Namespace}} storage</div>
+      <div>{{.UsageDetail}}</div>
+    </div>
+
+    <nav class="segmented data-modes" aria-label="Data namespace">
+      <a href="{{.LiveURL}}"{{if eq .Namespace "live"}} aria-current="page"{{end}}>Live <span>public release</span></a>
+      <a href="{{.DraftURL}}"{{if eq .Namespace "draft"}} aria-current="page"{{end}}>Draft <span>private preview</span></a>
+    </nav>
+
+    <div class="data-console">
+      <aside class="panel-card data-collections">
+        <p class="card-label">{{.NamespaceLabel}} collections</p>
+        {{if .Collections}}
+        <nav aria-label="Collections">
+          {{range .Collections}}
+          <a href="{{.URL}}"{{if .Selected}} aria-current="page"{{end}}>
+            <span class="collection-name">{{.Name}}</span>
+            <span class="collection-meta">{{.Documents}} docs · {{.Bytes}}{{if not .Declared}} · undeclared{{end}}</span>
+          </a>
+          {{end}}
+        </nav>
+        {{else}}
+        <div class="empty-state compact-empty">
+          <div class="empty-mark" aria-hidden="true">◇</div>
+          <strong>No collections</strong>
+          <p>This namespace has no declared or stored collections yet.</p>
+        </div>
+        {{end}}
+      </aside>
+
+      <section class="panel-card data-documents">
+        {{if .Selected}}
+        <div class="data-section-head">
+          <div>
+            <p class="card-label">Collection</p>
+            <h2>{{.Selected}}</h2>
+          </div>
+          <span class="pill">{{.Namespace}}</span>
+        </div>
+
+        {{if .Documents}}
+        <div class="document-list">
+          {{range .Documents}}
+          <details class="document-card">
+            <summary>
+              <span class="document-id">{{.ID}}</span>
+              <span class="document-time">updated {{.UpdatedAt}}</span>
+            </summary>
+            <div class="document-body">
+              <form action="/sites/{{$.SiteName}}/data/update" method="post" class="form-stack">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <input type="hidden" name="namespace" value="{{$.Namespace}}">
+                <input type="hidden" name="collection" value="{{$.Selected}}">
+                <input type="hidden" name="document_id" value="{{.ID}}">
+                <input type="hidden" name="revision" value="{{.Revision}}">
+                <label>JSON object
+                  <textarea class="json-editor" name="data" rows="10" maxlength="32768" spellcheck="false" required>{{.Data}}</textarea>
+                </label>
+                <div class="save-row">
+                  <span class="revision">revision {{.Revision}}</span>
+                  <button type="submit" class="btn compact">Save document</button>
+                </div>
+              </form>
+              <form action="/sites/{{$.SiteName}}/data/delete" method="post" class="document-delete" data-confirm="Delete document {{.ID}}? This cannot be undone.">
+                <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                <input type="hidden" name="namespace" value="{{$.Namespace}}">
+                <input type="hidden" name="collection" value="{{$.Selected}}">
+                <input type="hidden" name="document_id" value="{{.ID}}">
+                <input type="hidden" name="revision" value="{{.Revision}}">
+                <button type="submit" class="text-button danger-text">Delete document</button>
+              </form>
+            </div>
+          </details>
+          {{end}}
+        </div>
+        {{else}}
+        <div class="empty-state">
+          <div class="empty-mark" aria-hidden="true">◇</div>
+          <strong>No documents yet</strong>
+          <p>The collection exists, but this {{.Namespace}} namespace is empty.</p>
+        </div>
+        {{end}}
+
+        {{if or .HasPrevious .NextPageURL}}
+        <nav class="data-pagination" aria-label="Document pages">
+          {{if .HasPrevious}}<a class="btn quiet compact" href="{{.FirstPageURL}}">First page</a>{{else}}<span></span>{{end}}
+          {{if .NextPageURL}}<a class="btn quiet compact" href="{{.NextPageURL}}">Next page →</a>{{end}}
+        </nav>
+        {{end}}
+
+        <details class="collection-danger">
+          <summary>Clear this collection</summary>
+          <div class="danger-content">
+            <p class="card-sub">Deletes every {{.Namespace}} document in <strong>{{.Selected}}</strong>. Connected sites receive deletion events. This cannot be undone.</p>
+            <form action="/sites/{{.SiteName}}/data/clear" method="post" class="form-stack" data-confirm="Clear every document from {{.Selected}}?">
+              <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+              <input type="hidden" name="namespace" value="{{.Namespace}}">
+              <input type="hidden" name="collection" value="{{.Selected}}">
+              <label>Type <strong>{{.Selected}}</strong> to confirm
+                <input name="confirm" autocomplete="off" required>
+              </label>
+              <button type="submit" class="btn danger compact">Clear collection</button>
+            </form>
+          </div>
+        </details>
+        {{else}}
+        <div class="empty-state">
+          <div class="empty-mark" aria-hidden="true">◇</div>
+          <strong>Nothing to inspect</strong>
+          <p>Add a <code>wispist.json</code> declaration to a release, or let the site write its first document.</p>
+        </div>
+        {{end}}
+      </section>
+    </div>
+  </main>
+
+  {{template "app_footer" .CSRFToken}}
+</body>
+</html>{{end}}

@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"github.com/wispdeck/wispdeck/internal/auth"
 	"github.com/wispdeck/wispdeck/internal/shortlink"
 	hostedsite "github.com/wispdeck/wispdeck/internal/site"
+	"github.com/wispdeck/wispdeck/wispist"
 )
 
 const previewReturnLifetime = 10 * time.Minute
@@ -32,6 +34,7 @@ type siteReleaseView struct {
 	PublishedAt string
 	Draft       bool
 	Current     bool
+	Deletable   bool
 }
 
 type siteView struct {
@@ -65,7 +68,7 @@ func (s *Server) createSite(w http.ResponseWriter, r *http.Request) {
 		s.renderSiteManagementError(w, r, err, "Site not created")
 		return
 	}
-	http.Redirect(w, r, "/?site_created="+url.QueryEscape(created.Name)+"#sites", http.StatusSeeOther)
+	http.Redirect(w, r, "/sites/"+url.PathEscape(created.Name), http.StatusSeeOther)
 }
 
 func (s *Server) uploadSite(w http.ResponseWriter, r *http.Request) {
@@ -104,13 +107,21 @@ func (s *Server) uploadSite(w http.ResponseWriter, r *http.Request) {
 	}
 	bundle, err := hostedsite.ReadZIP(readerAt, header.Size)
 	if err == nil {
+		for _, bundledFile := range bundle.Files {
+			if bundledFile.Path == "wispist.json" {
+				_, err = s.wispist.ParseDeclaration(bundledFile.Body)
+				break
+			}
+		}
+	}
+	if err == nil {
 		_, err = s.sites.Upload(r.Context(), siteActor(session), r.PostForm.Get("site_id"), bundle)
 	}
 	if err != nil {
 		s.renderSiteManagementError(w, r, err, "Draft not uploaded")
 		return
 	}
-	http.Redirect(w, r, "/?site="+url.QueryEscape(r.PostForm.Get("site_name"))+"#sites", http.StatusSeeOther)
+	http.Redirect(w, r, "/sites/"+url.PathEscape(r.PostForm.Get("site_name")), http.StatusSeeOther)
 }
 
 func (s *Server) publishSite(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +135,7 @@ func (s *Server) publishSite(w http.ResponseWriter, r *http.Request) {
 		s.renderSiteManagementError(w, r, err, "Release not published")
 		return
 	}
-	http.Redirect(w, r, "/?site="+url.QueryEscape(r.PostForm.Get("site_name"))+"#sites", http.StatusSeeOther)
+	http.Redirect(w, r, "/sites/"+url.PathEscape(r.PostForm.Get("site_name")), http.StatusSeeOther)
 }
 
 func (s *Server) setSiteState(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +157,7 @@ func (s *Server) setSiteState(w http.ResponseWriter, r *http.Request) {
 		s.renderSiteManagementError(w, r, err, "Site state not changed")
 		return
 	}
-	http.Redirect(w, r, "/?site="+url.QueryEscape(r.PostForm.Get("site_name"))+"#sites", http.StatusSeeOther)
+	http.Redirect(w, r, "/sites/"+url.PathEscape(r.PostForm.Get("site_name")), http.StatusSeeOther)
 }
 
 func (s *Server) previewSite(w http.ResponseWriter, r *http.Request) {
@@ -227,11 +238,15 @@ func (s *Server) renderSiteManagementError(w http.ResponseWriter, r *http.Reques
 	case errors.Is(err, hostedsite.ErrNameUnavailable):
 		status = http.StatusConflict
 		message = err.Error()
+	case errors.Is(err, hostedsite.ErrSiteLimit), errors.Is(err, hostedsite.ErrReleaseLimit),
+		errors.Is(err, hostedsite.ErrStorageLimit), errors.Is(err, hostedsite.ErrSelectedRelease):
+		status = http.StatusConflict
+		message = err.Error()
 	case errors.Is(err, hostedsite.ErrInvalidName), errors.Is(err, hostedsite.ErrInvalidTitle),
 		errors.Is(err, shortlink.ErrReservedSlug), errors.Is(err, hostedsite.ErrInvalidBundle),
 		errors.Is(err, hostedsite.ErrBundleTooLarge), errors.Is(err, hostedsite.ErrTooManyFiles),
 		errors.Is(err, hostedsite.ErrInvalidFile), errors.Is(err, hostedsite.ErrNoDraft),
-		errors.Is(err, hostedsite.ErrInvalidPreview):
+		errors.Is(err, hostedsite.ErrInvalidPreview), errors.Is(err, wispist.ErrInvalidDeclaration):
 		message = err.Error()
 	default:
 		s.config.Logger.ErrorContext(r.Context(), "manage hosted site", "title", title, "error", err)
@@ -383,15 +398,6 @@ func (s *Server) redirectSiteAlias(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveSiteHost(w http.ResponseWriter, r *http.Request, name string) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if strings.HasPrefix(strings.ToLower(r.URL.Path), "/_wispdeck/") {
-		http.NotFound(w, r)
-		return
-	}
 	value, err := s.sites.SiteByName(r.Context(), name)
 	if errors.Is(err, hostedsite.ErrNotFound) {
 		http.NotFound(w, r)
@@ -407,6 +413,28 @@ func (s *Server) serveSiteHost(w http.ResponseWriter, r *http.Request, name stri
 		return
 	}
 	releaseID := value.PublishedReleaseID
+	if isWispistPath(r.URL.Path) {
+		binding, err := s.siteWispistBinding(
+			r.Context(), value, releaseID, wispist.ModeLive, false, requestSiteOrigin(s.config.AppOrigin.Scheme, r.Host),
+			s.clientAddress(r),
+		)
+		if err != nil {
+			s.config.Logger.ErrorContext(r.Context(), "bind Wispist public request", "error", err, "site_id", value.ID)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		s.wispist.ServeHTTP(w, r, binding)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if strings.HasPrefix(strings.ToLower(r.URL.Path), "/_wispdeck/") {
+		http.NotFound(w, r)
+		return
+	}
 	if releaseID == "" {
 		if value.DraftReleaseID != "" {
 			s.renderDraftGate(w, r, value)
@@ -419,16 +447,21 @@ func (s *Server) serveSiteHost(w http.ResponseWriter, r *http.Request, name stri
 }
 
 func (s *Server) serveSitePreviewHost(w http.ResponseWriter, r *http.Request, originLabel string) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	switch {
 	case r.URL.Path == "/_wispdeck/preview/accept":
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		s.acceptSitePreview(w, r, originLabel)
 		return
 	case strings.HasPrefix(r.URL.Path, "/_wispdeck/preview/view/"):
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		s.selectSitePreviewView(w, r, originLabel)
 		return
 	case strings.HasPrefix(strings.ToLower(r.URL.Path), "/_wispdeck/"):
@@ -447,6 +480,31 @@ func (s *Server) serveSitePreviewHost(w http.ResponseWriter, r *http.Request, or
 		releaseID = preview.PublishedReleaseID
 	} else {
 		view = "draft"
+	}
+	if isWispistPath(r.URL.Path) {
+		mode := wispist.ModeDraft
+		readOnly := false
+		if view == "current" {
+			mode = wispist.ModeLivePreview
+			readOnly = true
+		}
+		binding, err := s.siteWispistBinding(
+			r.Context(), preview.Site, releaseID, mode, readOnly,
+			requestSiteOrigin(s.config.AppOrigin.Scheme, r.Host),
+			s.clientAddress(r),
+		)
+		if err != nil {
+			s.config.Logger.ErrorContext(r.Context(), "bind Wispist preview request", "error", err, "site_id", preview.Site.ID)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		s.wispist.ServeHTTP(w, r, binding)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
 	s.serveSiteFile(w, r, preview.Site, releaseID, view, true)
 }
@@ -475,8 +533,34 @@ func (s *Server) serveSiteFile(
 	}
 	body := file.Body
 	digest := file.Digest
-	if hasPreview && strings.HasPrefix(file.ContentType, "text/html") {
-		body = s.addPreviewToolbar(body, value, view, r.URL.RequestURI())
+	if strings.HasPrefix(file.ContentType, "text/html") {
+		mode := wispist.ModeLive
+		readOnly := false
+		if hasPreview && view == "draft" {
+			mode = wispist.ModeDraft
+		} else if hasPreview {
+			mode = wispist.ModeLivePreview
+			readOnly = true
+		}
+		binding, err := s.siteWispistBinding(
+			r.Context(), value, releaseID, mode, readOnly,
+			requestSiteOrigin(s.config.AppOrigin.Scheme, r.Host),
+			s.clientAddress(r),
+		)
+		if err != nil {
+			s.config.Logger.ErrorContext(r.Context(), "bind Wispist HTML transform", "error", err, "site_id", value.ID)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		body, err = s.wispist.TransformHTML(binding, body)
+		if err != nil {
+			s.config.Logger.ErrorContext(r.Context(), "inject Wispist client", "error", err, "site_id", value.ID)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		if hasPreview {
+			body = s.addPreviewToolbar(body, value, view, r.URL.RequestURI())
+		}
 		digest = sha256.Sum256(body)
 	}
 	etag := `"` + hex.EncodeToString(digest[:]) + `"`
@@ -496,6 +580,49 @@ func (s *Server) serveSiteFile(
 		return
 	}
 	http.ServeContent(w, r, file.Path, time.Time{}, bytes.NewReader(body))
+}
+
+func isWispistPath(value string) bool {
+	lower := strings.ToLower(value)
+	return lower == "/_wispist" || strings.HasPrefix(lower, "/_wispist/")
+}
+
+func requestSiteOrigin(scheme, host string) string {
+	return scheme + "://" + host
+}
+
+func (s *Server) siteWispistBinding(
+	ctx context.Context,
+	value hostedsite.Site,
+	releaseID string,
+	mode wispist.Mode,
+	readOnly bool,
+	origin string,
+	clientKey string,
+) (wispist.Binding, error) {
+	declaration := wispist.EmptyDeclaration()
+	if releaseID != "" {
+		file, err := s.sites.File(ctx, releaseID, "wispist.json")
+		switch {
+		case err == nil:
+			declaration, err = s.wispist.ParseDeclaration(file.Body)
+			if err != nil {
+				return wispist.Binding{}, fmt.Errorf("parse stored Wispist declaration: %w", err)
+			}
+		case errors.Is(err, hostedsite.ErrNotFound):
+		default:
+			return wispist.Binding{}, fmt.Errorf("load Wispist declaration: %w", err)
+		}
+	}
+	namespace := "live"
+	if mode == wispist.ModeDraft {
+		namespace = "draft"
+	}
+	return wispist.Binding{
+		StoreKey: value.ID, Namespace: namespace, Origin: origin, ClientKey: clientKey,
+		Principal:   wispist.Principal{Kind: wispist.PrincipalAnonymous},
+		Declaration: declaration, Mode: mode, ReadOnly: readOnly,
+	}, nil
 }
 
 func hostedFilePath(requestPath string) (string, bool) {
@@ -523,9 +650,7 @@ func (s *Server) renderDraftGate(w http.ResponseWriter, r *http.Request, value h
 
 func (s *Server) renderEmptySite(w http.ResponseWriter, _ *http.Request, value hostedsite.Site) {
 	manage := *s.config.AppOrigin
-	manage.Path = "/"
-	manage.RawQuery = url.Values{"site": {value.Name}}.Encode()
-	manage.Fragment = "sites"
+	manage.Path = "/sites/" + value.Name
 	s.renderSiteState(w, http.StatusOK, siteStateView{
 		Name: value.Name, ActionURL: manage.String(),
 	})
@@ -633,9 +758,7 @@ func (s *Server) addPreviewToolbar(body []byte, value hostedsite.Site, view, ret
 		draft = `<strong>Draft</strong>`
 	}
 	manage := *s.config.AppOrigin
-	manage.Path = "/"
-	manage.RawQuery = url.Values{"site": {value.Name}}.Encode()
-	manage.Fragment = "sites"
+	manage.Path = "/sites/" + value.Name
 	bar := `<style id="wispdeck-preview-style">#wispdeck-preview-bar{position:fixed;z-index:2147483647;top:0;left:0;right:0;min-height:44px;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:8px 14px;background:#171820;color:#f7f7fb;border-bottom:1px solid #363845;font:600 14px/1.3 system-ui,sans-serif}#wispdeck-preview-bar div{display:flex;align-items:center;gap:12px}#wispdeck-preview-bar a{color:#b5aaff;text-decoration:none}#wispdeck-preview-bar strong{color:#fff}#wispdeck-preview-bar .wispdeck-draft{padding:3px 7px;border-radius:999px;background:#443b78;color:#ddd7ff;font-size:11px;text-transform:uppercase;letter-spacing:.06em}</style><div id="wispdeck-preview-bar"><div><span class="wispdeck-draft">Draft preview</span><span>` + html.EscapeString(value.Name) + `</span></div><div>` + current + draft + `<a href="` + html.EscapeString(manage.String()) + `">Publish…</a></div></div>`
 	lower := bytes.ToLower(body)
 	if start := bytes.Index(lower, []byte("<body")); start >= 0 {
@@ -689,31 +812,30 @@ func formatBytes(value int64) string {
 	if value < unit*unit {
 		return fmt.Sprintf("%.1f KiB", float64(value)/unit)
 	}
-	return fmt.Sprintf("%.1f MiB", float64(value)/(unit*unit))
+	if value < unit*unit*unit {
+		return fmt.Sprintf("%.1f MiB", float64(value)/(unit*unit))
+	}
+	return fmt.Sprintf("%.1f GiB", float64(value)/(unit*unit*unit))
 }
 
-func siteViews(values []hostedsite.Site, s *Server, selected string) []siteView {
-	views := make([]siteView, 0, len(values))
-	for _, value := range values {
-		view := siteView{
-			ID: value.ID, OwnerUsername: value.OwnerUsername, Name: value.Name,
-			Title: value.Title, URL: s.siteURL(value.Name, "/").String(), Enabled: value.Enabled,
-			HasDraft: value.DraftReleaseID != "", HasPublished: value.PublishedReleaseID != "",
-			Selected: value.Name == selected,
-		}
-		for _, release := range value.Releases {
-			publishedAt := "Never"
-			if !release.PublishedAt.IsZero() {
-				publishedAt = release.PublishedAt.Format("2006-01-02 15:04 UTC")
-			}
-			view.Releases = append(view.Releases, siteReleaseView{
-				ID: release.ID, Version: release.Version, FileCount: release.FileCount,
-				TotalSize: formatBytes(release.TotalBytes),
-				CreatedAt: release.CreatedAt.Format("2006-01-02 15:04 UTC"), PublishedAt: publishedAt,
-				Draft: release.ID == value.DraftReleaseID, Current: release.ID == value.PublishedReleaseID,
-			})
-		}
-		views = append(views, view)
+func siteViewFrom(value hostedsite.Site, s *Server, now time.Time) siteView {
+	view := siteView{
+		ID: value.ID, OwnerUsername: value.OwnerUsername, Name: value.Name,
+		Title: value.Title, URL: s.siteURL(value.Name, "/").String(), Enabled: value.Enabled,
+		HasDraft: value.DraftReleaseID != "", HasPublished: value.PublishedReleaseID != "",
 	}
-	return views
+	for _, release := range value.Releases {
+		publishedAt := "Never"
+		if !release.PublishedAt.IsZero() {
+			publishedAt = shortDateTime(release.PublishedAt, now)
+		}
+		view.Releases = append(view.Releases, siteReleaseView{
+			ID: release.ID, Version: release.Version, FileCount: release.FileCount,
+			TotalSize: formatBytes(release.TotalBytes),
+			CreatedAt: shortDateTime(release.CreatedAt, now), PublishedAt: publishedAt,
+			Draft: release.ID == value.DraftReleaseID, Current: release.ID == value.PublishedReleaseID,
+			Deletable: release.ID != value.DraftReleaseID && release.ID != value.PublishedReleaseID,
+		})
+	}
+	return view
 }

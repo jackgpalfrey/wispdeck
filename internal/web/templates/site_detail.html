@@ -1,0 +1,159 @@
+{{define "site_detail.html"}}<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  {{template "head_assets"}}
+  <title>{{.Host}} — Wispdeck</title>
+</head>
+<body>
+  {{template "app_header" .Shell}}
+
+  <main class="page w-detail">
+    <a class="backlink" href="/">← My Links</a>
+
+    <div class="detail-head">
+      <span class="detail-title">{{.Host}}</span>
+      {{if not .Site.Enabled}}<span class="pill warn">offline</span>
+      {{else if .Site.HasPublished}}<span class="pill live">● live</span>
+      {{else if .Site.HasDraft}}<span class="pill warn">◌ draft only</span>
+      {{else}}<span class="pill">empty</span>{{end}}
+      {{if and .Site.HasDraft .Site.HasPublished}}<span class="pill warn">unpublished changes</span>{{end}}
+      <button type="button" class="btn quiet compact" data-copy="{{.Site.URL}}">copy URL</button>
+      {{if .Site.HasPublished}}<a class="btn quiet compact" href="{{.Site.URL}}" target="_blank" rel="noreferrer">Visit ↗</a>{{end}}
+	  <a class="btn quiet compact" href="/sites/{{.Site.Name}}/data">Data</a>
+      {{if .Site.HasDraft}}
+      <form action="/sites/preview" method="post">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="site_name" value="{{.Site.Name}}">
+        <button type="submit" class="btn compact">Preview draft</button>
+      </form>
+      {{end}}
+    </div>
+    {{if .Site.Title}}<div class="detail-sub">{{.Site.Title}}</div>{{end}}
+
+    <div class="detail-stats">
+	  <div><span class="n">{{.ReleaseUsage}}</span> releases</div>
+      {{if .CurrentFiles}}<div><span class="n">{{.CurrentFiles}}</span> files live</div>{{end}}
+	  {{if .CurrentSize}}<div><span class="n">{{.CurrentSize}}</span> current bundle</div>{{end}}
+	  <div><span class="n">{{.StorageUsage}}</span> release storage</div>
+      {{if .UpdatedAt}}<div>updated <span class="v">{{.UpdatedAt}}</span></div>{{end}}
+      <div>created <span class="v">{{.CreatedAt}}</span></div>
+      {{if .OwnerUsername}}<div>owner <span class="v">{{.OwnerUsername}}</span></div>{{end}}
+    </div>
+
+    <div class="panel-card">
+      <p class="card-label">Releases · newest first</p>
+      {{if .Site.Releases}}
+      {{range .Site.Releases}}
+      <div class="release-row">
+        <span class="rel-v{{if .Current}} current{{end}}">v{{.Version}}</span>
+        <span class="msg">{{.FileCount}} file{{if ne .FileCount 1}}s{{end}} · {{.TotalSize}}
+          <span class="when">· uploaded {{.CreatedAt}}{{if ne .PublishedAt "Never"}} · first published {{.PublishedAt}}{{end}}</span>
+        </span>
+        {{if .Current}}<span class="pill live">current</span>{{end}}
+        {{if .Draft}}<span class="pill warn">draft</span>{{end}}
+        {{if .Draft}}
+        <form action="/sites/publish" method="post">
+          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+          <input type="hidden" name="site_id" value="{{$.Site.ID}}">
+          <input type="hidden" name="site_name" value="{{$.Site.Name}}">
+          <input type="hidden" name="release_id" value="{{.ID}}">
+          <button type="submit" class="release-action primary">Publish publicly</button>
+        </form>
+        {{else if not .Current}}
+        <form action="/sites/publish" method="post">
+          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+          <input type="hidden" name="site_id" value="{{$.Site.ID}}">
+          <input type="hidden" name="site_name" value="{{$.Site.Name}}">
+          <input type="hidden" name="release_id" value="{{.ID}}">
+          <button type="submit" class="release-action">Roll back to this</button>
+        </form>
+        {{end}}
+		{{if .Deletable}}
+		<form action="/sites/{{$.Site.Name}}/releases/delete" method="post" data-confirm="Delete release v{{.Version}}? This cannot be undone.">
+		  <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+		  <input type="hidden" name="release_id" value="{{.ID}}">
+		  <button type="submit" class="release-action danger-text">Delete</button>
+		</form>
+		{{end}}
+      </div>
+      {{end}}
+      {{else}}
+      <div class="empty-state">
+        <div class="empty-mark" aria-hidden="true">◇</div>
+        <strong>No releases yet</strong>
+        <p>Upload a ZIP bundle below to create this site’s first private draft.</p>
+      </div>
+      {{end}}
+    </div>
+
+    <div class="two-col">
+      <div class="panel-card on-card">
+        <p class="card-label">Upload a new draft</p>
+        <form action="/sites/upload" method="post" enctype="multipart/form-data" class="form-stack">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <input type="hidden" name="site_id" value="{{.Site.ID}}">
+          <input type="hidden" name="site_name" value="{{.Site.Name}}">
+          <label class="upload-drop">
+            <span data-drop-label>Drop a ZIP of your built site here — or click to browse</span>
+            <input name="bundle" type="file" accept=".zip,application/zip" required>
+          </label>
+          <p class="helper">Needs <code>index.html</code> at the ZIP root. Uploading never changes the live version — publish the draft when it looks right. Maximum 20 MiB upload, 50 MiB expanded, 500 files.</p>
+          <div class="save-row">
+            <button type="submit" class="btn compact">Upload draft</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel-stack">
+        <div class="panel-card">
+          <p class="card-label">Address</p>
+          <dl class="kv">
+            <div><dt>public URL</dt><dd><a href="{{.Site.URL}}" target="_blank" rel="noreferrer">{{.Host}}</a></dd></div>
+            <div><dt>also reachable</dt><dd>{{.AliasDisplay}}</dd></div>
+            <div><dt>status</dt><dd>{{.StatusLine}}</dd></div>
+			<div><dt>owner usage</dt><dd>{{.OwnerUsage}}</dd></div>
+          </dl>
+        </div>
+
+        <div class="panel-card">
+          <div class="toggle-row">
+            <div>
+              <div class="card-title">{{if .Site.Enabled}}Take this site offline{{else}}Bring this site online{{end}}</div>
+              <p class="card-sub">The name remains reserved to its original owner either way.</p>
+            </div>
+            <form action="/sites/state" method="post">
+              <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+              <input type="hidden" name="site_id" value="{{.Site.ID}}">
+              <input type="hidden" name="site_name" value="{{.Site.Name}}">
+              {{if .Site.Enabled}}
+              <input type="hidden" name="enabled" value="false">
+              <button type="submit" class="btn danger compact">Disable site</button>
+              {{else}}
+              <input type="hidden" name="enabled" value="true">
+              <button type="submit" class="btn compact">Enable site</button>
+              {{end}}
+            </form>
+          </div>
+        </div>
+
+		<details class="panel-card danger-zone">
+		  <summary>Danger zone</summary>
+		  <div class="danger-content">
+			<div class="card-title">Erase this site's contents</div>
+			<p class="card-sub">Permanently deletes every release plus live and draft Wispist data. The address remains reserved to this owner and can be republished later. The site will be left offline.</p>
+			<form action="/sites/{{.Site.Name}}/purge" method="post" class="form-stack" data-confirm="Erase every release and all Wispist data for {{.Host}}?">
+			  <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+			  <label>Type <strong>{{.Site.Name}}</strong> to confirm
+				<input name="confirm" autocomplete="off" required>
+			  </label>
+			  <button type="submit" class="btn danger compact">Erase site contents</button>
+			</form>
+		  </div>
+		</details>
+      </div>
+    </div>
+  </main>
+
+  {{template "app_footer" .CSRFToken}}
+</body>
+</html>{{end}}

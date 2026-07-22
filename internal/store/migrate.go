@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 9
+const SchemaVersion = 11
 
 func migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
@@ -26,10 +26,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	if version > schemaVersion {
-		return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
+	if version > SchemaVersion {
+		return fmt.Errorf("database schema version %d is newer than supported version %d", version, SchemaVersion)
 	}
-	for version < schemaVersion {
+	for version < SchemaVersion {
 		switch version + 1 {
 		case 1:
 			if err := migrationOne(ctx, tx); err != nil {
@@ -67,6 +67,14 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err := migrationNine(ctx, tx); err != nil {
 				return err
 			}
+		case 10:
+			if err := migrationTen(ctx, tx); err != nil {
+				return err
+			}
+		case 11:
+			if err := migrationEleven(ctx, tx); err != nil {
+				return err
+			}
 		}
 		version++
 		if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
@@ -78,6 +86,78 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func migrationEleven(ctx context.Context, tx *sql.Tx) error {
+	const schema = `
+		CREATE TABLE update_settings (
+			singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+			mode TEXT NOT NULL CHECK(mode IN ('notify', 'automatic', 'disabled')),
+			skipped_version TEXT NOT NULL DEFAULT '' CHECK(length(skipped_version) <= 64),
+			updated_at INTEGER NOT NULL,
+			updated_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL
+		) STRICT;
+		INSERT INTO update_settings (singleton, mode, skipped_version, updated_at)
+		VALUES (1, 'notify', '', 0);
+
+		CREATE TABLE update_events (
+			id INTEGER PRIMARY KEY,
+			occurred_at INTEGER NOT NULL,
+			actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+			actor_username TEXT NOT NULL CHECK(length(actor_username) <= 64),
+			client_ip TEXT NOT NULL CHECK(length(client_ip) <= 128),
+			kind TEXT NOT NULL CHECK(kind IN (
+				'settings_changed', 'version_skipped', 'check_requested',
+				'update_requested', 'update_succeeded', 'update_rolled_back'
+			)),
+			version TEXT NOT NULL CHECK(length(version) <= 64),
+			details TEXT NOT NULL CHECK(length(details) <= 500)
+		) STRICT;
+		CREATE INDEX update_events_time ON update_events(occurred_at DESC, id DESC);
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 11: %w", err)
+	}
+	return nil
+}
+
+func migrationTen(ctx context.Context, tx *sql.Tx) error {
+	const schema = `
+		ALTER TABLE sites ADD COLUMN next_release_version INTEGER NOT NULL DEFAULT 1
+			CHECK(next_release_version > 0);
+		UPDATE sites
+		SET next_release_version = COALESCE(
+			(SELECT MAX(version) + 1 FROM site_releases WHERE site_id = sites.id), 1
+		);
+
+		DROP INDEX site_audit_owner_time;
+		ALTER TABLE site_audit_events RENAME TO site_audit_events_v9;
+
+		CREATE TABLE site_audit_events (
+			id INTEGER PRIMARY KEY,
+			occurred_at INTEGER NOT NULL,
+			actor_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+			name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 48),
+			kind TEXT NOT NULL CHECK(kind IN (
+				'uploaded', 'published', 'enabled', 'disabled',
+				'release_deleted', 'purged'
+			))
+		) STRICT;
+		INSERT INTO site_audit_events (
+			id, occurred_at, actor_user_id, owner_user_id, site_id, name, kind
+		)
+		SELECT id, occurred_at, actor_user_id, owner_user_id, site_id, name, kind
+		FROM site_audit_events_v9;
+		DROP TABLE site_audit_events_v9;
+		CREATE INDEX site_audit_owner_time
+			ON site_audit_events(owner_user_id, occurred_at DESC, id DESC);
+	`
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("apply schema version 10: %w", err)
 	}
 	return nil
 }

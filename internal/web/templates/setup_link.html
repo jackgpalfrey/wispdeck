@@ -1,17 +1,25 @@
 {{define "setup_link.html"}}<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{template "head_assets"}}
   <title>Setup link replaced — Wispdeck</title>
-  <link rel="stylesheet" href="/assets/admin.css">
 </head>
 <body>
-  <main class="panel wide">
-    <h1>Setup link replaced</h1>
-    <p>The previous link is invalid. Give this new one-use link to the user:</p>
-    <input class="setup-secret" value="{{.SetupURL}}" readonly aria-label="Setup link">
-    <p><a href="/settings/users">Return to users</a></p>
+  <main class="auth-main">
+    <div class="auth-box">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">w</span>
+        <span>Wispdeck</span>
+      </a>
+      <div class="auth-card on-card">
+        <div>
+          <h1>Setup link replaced</h1>
+          <p class="auth-sub">The previous link is invalid. Give this new one-use link to the user:</p>
+        </div>
+        <input class="setup-secret" value="{{.SetupURL}}" readonly aria-label="Setup link">
+      </div>
+      <p class="auth-foot"><a href="/settings/users">Return to users</a></p>
+    </div>
   </main>
 </body>
 </html>{{end}}

@@ -25,6 +25,9 @@ import (
 	"github.com/wispdeck/wispdeck/internal/shortlink"
 	"github.com/wispdeck/wispdeck/internal/site"
 	"github.com/wispdeck/wispdeck/internal/store"
+	"github.com/wispdeck/wispdeck/internal/updater"
+	"github.com/wispdeck/wispdeck/wispist"
+	wispistsqlite "github.com/wispdeck/wispdeck/wispist/sqlite"
 )
 
 type testServer struct {
@@ -36,9 +39,19 @@ type testServer struct {
 	totp        *auth.TOTPService
 	links       *shortlink.Service
 	sites       *site.Service
+	wispist     *wispist.Engine
+	updates     *updater.Manager
 }
 
 func newTestServer(t *testing.T, production bool) testServer {
+	return newTestServerWithUpdates(t, production, nil)
+}
+
+func newTestServerWithUpdates(
+	t *testing.T,
+	production bool,
+	updateFactory func(*store.SQLite) *updater.Manager,
+) testServer {
 	t.Helper()
 	ctx := context.Background()
 	database, err := store.OpenSQLite(ctx, filepath.Join(t.TempDir(), "wispdeck.db"))
@@ -78,13 +91,31 @@ func newTestServer(t *testing.T, production bool) testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shortLinkService, err := shortlink.NewService(database)
+	shortLinkService, err := shortlink.NewService(database, shortlink.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
-	siteService, err := site.NewService(database)
+	siteService, err := site.NewService(database, site.DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
+	}
+	wispistStores, err := wispistsqlite.NewFactory(filepath.Join(t.TempDir(), "wispist"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wispistStores.Close() })
+	wispistEngine, err := wispist.NewEngine(wispist.Config{
+		StoreFactory: wispistStores,
+		Limits:       wispist.DefaultLimits(),
+		RateLimits:   wispist.DefaultRateLimits(),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updateManager *updater.Manager
+	if updateFactory != nil {
+		updateManager = updateFactory(database)
 	}
 	server, err := New(Config{
 		AppOrigin:       origin,
@@ -92,14 +123,15 @@ func newTestServer(t *testing.T, production bool) testServer {
 		Development:     !production,
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		PasswordChecker: auth.NewStaticPasswordChecker(),
-	}, authService, passkeyService, totpService, shortLinkService, siteService)
+	}, authService, passkeyService, totpService, shortLinkService, siteService, wispistEngine, updateManager)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return testServer{
 		handler: server.Handler(), authService: authService,
 		database: database, keys: keyMaterial, passkeys: passkeyService,
-		totp: totpService, links: shortLinkService, sites: siteService,
+		totp: totpService, links: shortLinkService, sites: siteService, wispist: wispistEngine,
+		updates: updateManager,
 	}
 }
 
@@ -114,6 +146,37 @@ func request(method, target string, body url.Values) *http.Request {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 	return r
+}
+
+func TestHealthzIsMinimalAndDoesNotCaptureSiteOrigins(t *testing.T) {
+	server := newTestServer(t, false)
+	for _, host := range []string{"admin.example.test", "127.0.0.1:8080", "[::1]:8080"} {
+		r := httptest.NewRequest(http.MethodGet, "http://"+host+"/healthz", nil)
+		r.Host = host
+		w := httptest.NewRecorder()
+		server.handler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK || w.Body.String() != "ok\n" ||
+			w.Header().Get("Cache-Control") != "no-store" ||
+			w.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
+			t.Fatalf("health for %q = (%d, %#v, %q)", host, w.Code, w.Header(), w.Body.String())
+		}
+	}
+
+	post := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/healthz", nil)
+	post.Host = "127.0.0.1:8080"
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, post)
+	if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != "GET, HEAD" {
+		t.Fatalf("health POST = (%d, %#v)", w.Code, w.Header())
+	}
+
+	siteRequest := httptest.NewRequest(http.MethodGet, "http://notes.sites.example.test/healthz", nil)
+	siteRequest.Host = "notes.sites.example.test"
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, siteRequest)
+	if w.Code != http.StatusNotFound || w.Body.String() == "ok\n" {
+		t.Fatalf("site-origin health path = (%d, %q)", w.Code, w.Body.String())
+	}
 }
 
 func directShortLinkValues(csrf, slug, target string) url.Values {
@@ -287,13 +350,22 @@ func TestShortLinkCreateResolveAndDisable(t *testing.T) {
 	w = httptest.NewRecorder()
 	server.handler.ServeHTTP(w, dashboard)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "/release-notes") ||
-		!strings.Contains(w.Body.String(), "<strong>1</strong> visit") ||
+		!strings.Contains(w.Body.String(), `<span class="num">1</span>`) ||
 		!strings.Contains(w.Body.String(), "Your short link is ready") {
 		t.Fatalf("short-link dashboard = (%d, %q)", w.Code, w.Body.String())
 	}
 	links, err := server.database.ShortLinks(context.Background(), session.User.ID, false)
 	if err != nil || len(links) != 1 {
 		t.Fatalf("stored short links = (%#v, %v)", links, err)
+	}
+
+	detail := request(http.MethodGet, "http://admin.example.test/links/"+links[0].ID, nil)
+	detail.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, detail)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "admin.example.test/release-notes") ||
+		!strings.Contains(w.Body.String(), "1</span> visit · all time") {
+		t.Fatalf("short-link detail = (%d, %q)", w.Code, w.Body.String())
 	}
 
 	disable := request(http.MethodPost, "http://admin.example.test/links/state", url.Values{
@@ -358,8 +430,17 @@ func TestHostedSiteDraftPreviewPublishRollbackAndAliases(t *testing.T) {
 	create.AddCookie(cookie)
 	w := httptest.NewRecorder()
 	server.handler.ServeHTTP(w, create)
-	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/?site_created=docs#sites" {
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/sites/docs" {
 		t.Fatalf("create site = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+
+	siteDetail := request(http.MethodGet, "http://admin.example.test/sites/docs", nil)
+	siteDetail.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, siteDetail)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "docs.sites.example.test") ||
+		!strings.Contains(w.Body.String(), "Upload a new draft") {
+		t.Fatalf("site detail = (%d, %q)", w.Code, w.Body.String())
 	}
 
 	empty := siteRequest(http.MethodGet, "http://docs.sites.example.test/", "docs.sites.example.test")
@@ -722,6 +803,336 @@ func TestDraftPreviewEntryContinuesThroughLogin(t *testing.T) {
 	_ = cookie
 }
 
+func TestWispistHostedSiteLiveDraftIsolation(t *testing.T) {
+	server := newTestServer(t, false)
+	sessionCookie, session := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+	actor := site.Actor{UserID: session.User.ID}
+	created, err := server.sites.Create(context.Background(), actor, "itinerary", "Holiday itinerary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration := `{"version":1,"collections":{"before-you-go":{"access":"shared"}}}`
+	firstZIP := webZIP(t, map[string]string{
+		"index.html":   `<html><head><script>window.ready = Boolean(wispist)</script></head><body>One</body></html>`,
+		"wispist.json": declaration,
+	})
+	firstBundle, err := site.ReadZIP(bytes.NewReader(firstZIP), int64(len(firstZIP)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRelease, err := server.sites.Upload(context.Background(), actor, created.ID, firstBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.sites.Publish(context.Background(), actor, created.ID, firstRelease.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	publicPage := siteRequest(http.MethodGet, "http://itinerary.sites.example.test/", "itinerary.sites.example.test")
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, publicPage)
+	bootstrap := `<head><script src="/_wispist/client/v1.js" data-wispist-bootstrap data-wispist-mode="live" data-wispist-read-only="false"></script><script>`
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), bootstrap) {
+		t.Fatalf("public bootstrap = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	publicOrigin := "http://itinerary.sites.example.test"
+	publicCreate := httptest.NewRequest(http.MethodPut, publicOrigin+"/_wispist/v1/collections/before-you-go/documents/passport", strings.NewReader(`{"data":{"text":"Pack passport","done":false}}`))
+	publicCreate.Host = "itinerary.sites.example.test"
+	publicCreate.Header.Set("Origin", publicOrigin)
+	publicCreate.Header.Set("Content-Type", "application/json")
+	publicCreate.Header.Set("If-None-Match", "*")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, publicCreate)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("public Wispist create = (%d, %q)", w.Code, w.Body.String())
+	}
+	var liveDocument struct {
+		Revision string `json:"revision"`
+		Data     struct {
+			Done bool `json:"done"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &liveDocument); err != nil {
+		t.Fatal(err)
+	}
+
+	secondZIP := webZIP(t, map[string]string{
+		"index.html":   `<html><head></head><body>Two</body></html>`,
+		"wispist.json": declaration,
+	})
+	secondBundle, err := site.ReadZIP(bytes.NewReader(secondZIP), int64(len(secondZIP)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRelease, err := server.sites.Upload(context.Background(), actor, created.ID, secondBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewCookie, viewCookie, previewURL := grantSitePreview(t, server, sessionCookie, session.CSRFToken, "itinerary")
+	previewOrigin := previewURL.Scheme + "://" + previewURL.Host
+	draftPage := siteRequest(http.MethodGet, previewOrigin+"/", previewURL.Host)
+	draftPage.AddCookie(previewCookie)
+	draftPage.AddCookie(viewCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, draftPage)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `data-wispist-mode="draft"`) ||
+		!strings.Contains(w.Body.String(), `data-wispist-read-only="false"`) {
+		t.Fatalf("draft bootstrap = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	draftCreate := httptest.NewRequest(http.MethodPut, previewOrigin+"/_wispist/v1/collections/before-you-go/documents/passport", strings.NewReader(`{"data":{"text":"Draft passport","done":true}}`))
+	draftCreate.Host = previewURL.Host
+	draftCreate.Header.Set("Origin", previewOrigin)
+	draftCreate.Header.Set("Content-Type", "application/json")
+	draftCreate.Header.Set("If-None-Match", "*")
+	draftCreate.AddCookie(previewCookie)
+	draftCreate.AddCookie(viewCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, draftCreate)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("draft Wispist create = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	publicRead := siteRequest(http.MethodGet, publicOrigin+"/_wispist/v1/collections/before-you-go/documents/passport", "itinerary.sites.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, publicRead)
+	if w.Code != http.StatusOK {
+		t.Fatalf("public Wispist read = (%d, %q)", w.Code, w.Body.String())
+	}
+	var stillLive struct {
+		Revision string `json:"revision"`
+		Data     struct {
+			Done bool `json:"done"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &stillLive); err != nil {
+		t.Fatal(err)
+	}
+	if stillLive.Data.Done || stillLive.Revision != liveDocument.Revision {
+		t.Fatalf("draft data leaked into live: %+v", stillLive)
+	}
+
+	selectCurrent := siteRequest(http.MethodGet, previewOrigin+"/_wispdeck/preview/view/current?return=/", previewURL.Host)
+	selectCurrent.AddCookie(previewCookie)
+	selectCurrent.AddCookie(viewCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, selectCurrent)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("select current = (%d, %q)", w.Code, w.Body.String())
+	}
+	currentCookie := responseCookie(t, w.Result(), "wispdeck_preview_view")
+	currentMutation := httptest.NewRequest(http.MethodPut, previewOrigin+"/_wispist/v1/collections/before-you-go/documents/passport", strings.NewReader(`{"data":{"done":true}}`))
+	currentMutation.Host = previewURL.Host
+	currentMutation.Header.Set("Origin", previewOrigin)
+	currentMutation.Header.Set("Content-Type", "application/json")
+	currentMutation.Header.Set("If-Match", `"`+liveDocument.Revision+`"`)
+	currentMutation.AddCookie(previewCookie)
+	currentMutation.AddCookie(currentCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, currentMutation)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), wispist.ProblemBaseURL+"forbidden/") {
+		t.Fatalf("current-preview mutation = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	if err := server.sites.Publish(context.Background(), actor, created.ID, secondRelease.ID); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, publicRead.Clone(context.Background()))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"done":false`) {
+		t.Fatalf("publish changed live data = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	invalidZIP := webZIP(t, map[string]string{
+		"index.html":   "invalid declaration",
+		"wispist.json": `{"version":1,"collections":{"items":{"access":"secret"}}}`,
+	})
+	invalidUpload := multipartSiteRequest(t, session.CSRFToken, created.ID, created.Name, invalidZIP)
+	invalidUpload.AddCookie(sessionCookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, invalidUpload)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid wispist.json") {
+		t.Fatalf("invalid declaration upload = (%d, %q)", w.Code, w.Body.String())
+	}
+}
+
+func TestWispistManagementExportRepairCleanupAndPermanentSiteName(t *testing.T) {
+	server := newTestServer(t, false)
+	cookie, session := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+	actor := site.Actor{UserID: session.User.ID}
+	created, err := server.sites.Create(context.Background(), actor, "shared-list", "Shared list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	declaration := `{"version":1,"collections":{"items":{"access":"shared"},"empty":{"access":"shared"}}}`
+	bundleBytes := webZIP(t, map[string]string{
+		"index.html": "<html><head></head><body>Shared</body></html>", "wispist.json": declaration,
+	})
+	bundle, err := site.ReadZIP(bytes.NewReader(bundleBytes), int64(len(bundleBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := server.sites.Upload(context.Background(), actor, created.ID, bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.sites.Publish(context.Background(), actor, created.ID, first.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	publicOrigin := "http://shared-list.sites.example.test"
+	createDocument := httptest.NewRequest(
+		http.MethodPut, publicOrigin+"/_wispist/v1/collections/items/documents/passport",
+		strings.NewReader(`{"data":{"done":false,"text":"Pack passport"}}`),
+	)
+	createDocument.Host = "shared-list.sites.example.test"
+	createDocument.Header.Set("Origin", publicOrigin)
+	createDocument.Header.Set("Content-Type", "application/json")
+	createDocument.Header.Set("If-None-Match", "*")
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, createDocument)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create managed document = (%d, %q)", w.Code, w.Body.String())
+	}
+	var original struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &original); err != nil {
+		t.Fatal(err)
+	}
+
+	dataPage := request(http.MethodGet, "http://admin.example.test/sites/shared-list/data?namespace=live&collection=items", nil)
+	dataPage.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, dataPage)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Site data") ||
+		!strings.Contains(w.Body.String(), "passport") || !strings.Contains(w.Body.String(), "empty") ||
+		!strings.Contains(w.Body.String(), "10.0 MiB") {
+		t.Fatalf("site data page = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	update := request(http.MethodPost, "http://admin.example.test/sites/shared-list/data/update", url.Values{
+		"csrf_token": {session.CSRFToken}, "namespace": {"live"}, "collection": {"items"},
+		"document_id": {"passport"}, "revision": {original.Revision},
+		"data": {`{"done":true,"text":"Packed passport"}`},
+	})
+	update.Header.Set("Origin", "http://admin.example.test")
+	update.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, update)
+	if w.Code != http.StatusSeeOther || !strings.Contains(w.Header().Get("Location"), "collection=items") {
+		t.Fatalf("managed document update = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+
+	stale := request(http.MethodPost, "http://admin.example.test/sites/shared-list/data/update", url.Values{
+		"csrf_token": {session.CSRFToken}, "namespace": {"live"}, "collection": {"items"},
+		"document_id": {"passport"}, "revision": {original.Revision}, "data": {`{"done":false}`},
+	})
+	stale.Header.Set("Origin", "http://admin.example.test")
+	stale.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, stale)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "changed after this page loaded") {
+		t.Fatalf("stale managed update = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	exportRequest := request(http.MethodGet, "http://admin.example.test/sites/shared-list/data/export", nil)
+	exportRequest.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, exportRequest)
+	if w.Code != http.StatusOK || !strings.Contains(w.Header().Get("Content-Disposition"), "shared-list-wispist.json") {
+		t.Fatalf("site data export = (%d, %#v, %q)", w.Code, w.Header(), w.Body.String())
+	}
+	var exported struct {
+		Format     string                               `json:"format"`
+		Namespaces map[string]wispist.NamespaceSnapshot `json:"namespaces"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &exported); err != nil {
+		t.Fatal(err)
+	}
+	var exportedData struct {
+		Done bool   `json:"done"`
+		Text string `json:"text"`
+	}
+	live := exported.Namespaces["live"]
+	if len(live.Collections["items"]) == 1 {
+		if err := json.Unmarshal(live.Collections["items"][0].Data, &exportedData); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if exported.Format != "wispist-site-export" || len(exported.Namespaces) != 2 ||
+		len(live.Collections["items"]) != 1 || len(live.Collections["empty"]) != 0 ||
+		!exportedData.Done || exportedData.Text != "Packed passport" {
+		t.Fatalf("exported data = %+v", exported)
+	}
+
+	clear := request(http.MethodPost, "http://admin.example.test/sites/shared-list/data/clear", url.Values{
+		"csrf_token": {session.CSRFToken}, "namespace": {"live"}, "collection": {"items"}, "confirm": {"items"},
+	})
+	clear.Header.Set("Origin", "http://admin.example.test")
+	clear.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, clear)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("clear collection = (%d, %q)", w.Code, w.Body.String())
+	}
+	usage, err := server.wispist.NamespaceUsage(context.Background(), wispist.NamespaceRef{
+		StoreKey: created.ID, Namespace: "live",
+	})
+	if err != nil || usage.Documents != 0 {
+		t.Fatalf("usage after clear = (%+v, %v)", usage, err)
+	}
+
+	second, err := server.sites.Upload(context.Background(), actor, created.ID, bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.sites.Upload(context.Background(), actor, created.ID, bundle); err != nil {
+		t.Fatal(err)
+	}
+	deleteRelease := request(http.MethodPost, "http://admin.example.test/sites/shared-list/releases/delete", url.Values{
+		"csrf_token": {session.CSRFToken}, "release_id": {second.ID},
+	})
+	deleteRelease.Header.Set("Origin", "http://admin.example.test")
+	deleteRelease.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, deleteRelease)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("delete old release = (%d, %q)", w.Code, w.Body.String())
+	}
+
+	purge := request(http.MethodPost, "http://admin.example.test/sites/shared-list/purge", url.Values{
+		"csrf_token": {session.CSRFToken}, "confirm": {"shared-list"},
+	})
+	purge.Header.Set("Origin", "http://admin.example.test")
+	purge.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, purge)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/sites/shared-list" {
+		t.Fatalf("purge site = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+	public := siteRequest(http.MethodGet, publicOrigin+"/", "shared-list.sites.example.test")
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, public)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("purged public site status = %d", w.Code)
+	}
+	sites, err := server.database.Sites(context.Background(), session.User.ID, false)
+	if err != nil || len(sites) != 1 || sites[0].Enabled || len(sites[0].Releases) != 0 {
+		t.Fatalf("purged managed site = (%+v, %v)", sites, err)
+	}
+	usage, err = server.wispist.NamespaceUsage(context.Background(), wispist.NamespaceRef{
+		StoreKey: created.ID, Namespace: "live",
+	})
+	if err != nil || usage.Documents != 0 || usage.Bytes != 0 {
+		t.Fatalf("purged Wispist data = (%+v, %v)", usage, err)
+	}
+	if _, err := server.sites.Create(context.Background(), actor, "shared-list", "replacement"); !errors.Is(err, site.ErrNameUnavailable) {
+		t.Fatalf("purge released public name: %v", err)
+	}
+}
+
 func siteRequest(method, target, host string) *http.Request {
 	r := httptest.NewRequest(method, target, nil)
 	r.Host = host
@@ -923,9 +1334,17 @@ func TestIndexAndOpenAllModesKeepPrivateMetadataPrivateAndBufferVisits(t *testin
 	server.handler.ServeHTTP(w, dashboard)
 	body = w.Body.String()
 	if w.Code != http.StatusOK || !strings.Contains(body, "data-copy=") ||
-		!strings.Contains(body, "SECRET private reading list") ||
-		!strings.Contains(body, stats[0].Day.Format("2006-01-02")) {
-		t.Fatalf("management metadata and stats = (%d, %q)", w.Code, body)
+		!strings.Contains(body, "SECRET private reading list") {
+		t.Fatalf("management metadata = (%d, %q)", w.Code, body)
+	}
+	detail := request(http.MethodGet, "http://admin.example.test/links/"+links[0].ID, nil)
+	detail.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, detail)
+	body = w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, "SECRET internal notes") ||
+		!strings.Contains(body, "1 visit · "+stats[0].Day.Format("Jan 2")) {
+		t.Fatalf("management stats detail = (%d, %q)", w.Code, body)
 	}
 
 	openValues := url.Values{
@@ -964,7 +1383,7 @@ func TestExpiredShortLinkIsPubliclyNotFound(t *testing.T) {
 	if _, err := server.database.CreateShortLink(ctx, user.ID, shortlink.Link{
 		Slug: "old", Mode: shortlink.ModeRedirect, ExpiresAt: createdAt.Add(time.Hour),
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, createdAt); err != nil {
+	}, shortlink.DefaultLimits(), createdAt); err != nil {
 		t.Fatal(err)
 	}
 	r := request(http.MethodGet, "http://admin.example.test/old", nil)
@@ -997,14 +1416,14 @@ func TestShortLinkOwnershipAndSuperuserManagement(t *testing.T) {
 	aliceLink, err := server.database.CreateShortLink(ctx, alice.ID, shortlink.Link{
 		Slug: "alice-link", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://alice.example"}},
-	}, time.Now().UTC())
+	}, shortlink.DefaultLimits(), time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
 	bobLink, err := server.database.CreateShortLink(ctx, bob.ID, shortlink.Link{
 		Slug: "bob-link", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://bob.example"}},
-	}, time.Now().UTC())
+	}, shortlink.DefaultLimits(), time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}

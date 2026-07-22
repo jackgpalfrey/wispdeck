@@ -251,8 +251,8 @@ func TestServiceUsesGenericCredentialFailure(t *testing.T) {
 			t.Fatalf("VerifyCredentials(%q) error = %v", username, err)
 		}
 	}
-	if got := repository.events[len(repository.events)-1].Username; got != "" {
-		t.Fatalf("invalid username persisted in audit event: %q", got)
+	if len(repository.events) != 1 || repository.events[0].Username != "alice" || repository.events[0].UserID != "user-1" {
+		t.Fatalf("persisted credential-failure events = %#v", repository.events)
 	}
 }
 

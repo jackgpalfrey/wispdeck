@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="A tiny static site for testing Wispdeck hosting.">
+  <meta name="description" content="A tiny static site for testing Wispdeck hosting and shared Wispist data.">
   <title>Hello from Wispdeck</title>
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
@@ -23,10 +23,26 @@
         immutable Wispdeck release.
       </p>
       <div class="actions">
-        <button id="celebrate" type="button">Test the JavaScript</button>
+        <a class="primary" href="#checklist">Try the shared checklist</a>
         <a class="secondary" href="/about/">Try a nested page</a>
       </div>
-      <p id="status" class="status" aria-live="polite">Waiting for a click.</p>
+    </section>
+
+    <section id="checklist" class="checklist" aria-labelledby="checklist-title">
+      <div>
+        <p class="eyebrow">Wispist shared state</p>
+        <h2 id="checklist-title">Before you go</h2>
+        <p class="checklist-intro">Open this page in a second browser. Changes appear there without a refresh.</p>
+      </div>
+      <form id="new-item-form">
+        <label for="new-item">Add something to remember</label>
+        <div class="form-row">
+          <input id="new-item" name="item" maxlength="180" autocomplete="off" required>
+          <button type="submit">Add item</button>
+        </div>
+      </form>
+      <p id="checklist-status" class="status" aria-live="polite">Loading the shared checklist…</p>
+      <ul id="checklist-items" class="checklist-items" aria-label="Before you go items"></ul>
     </section>
 
     <section class="facts" aria-label="Hosting features">
@@ -42,8 +58,8 @@
       </article>
       <article>
         <span>03</span>
-        <h2>No idle runtime</h2>
-        <p>There is no dedicated process waiting around for this site.</p>
+        <h2>Shared data</h2>
+        <p>The checklist persists without a dedicated process waiting around for this site.</p>
       </article>
     </section>
   </main>

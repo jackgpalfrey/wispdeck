@@ -1,0 +1,85 @@
+{{define "updates.html"}}<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  {{template "head_assets"}}
+  <title>Updates — Wispdeck</title>
+</head>
+<body>
+  {{template "app_header" .Shell}}
+
+  <main class="page w-mid settings-stack">
+    <a class="backlink" href="/settings">← Settings</a>
+    <div class="page-intro">
+      <h1>Updates</h1>
+      <p>Signed, tagged Wispdeck releases. Prereleases and branch builds are never installed.</p>
+    </div>
+
+    {{if .Message}}<div class="notice" role="status">{{.Message}}</div>{{end}}
+
+    <div class="panel-card">
+      <div class="card-title">Release status</div>
+      <div class="card-rows">
+        <div><span>Installed</span><span class="row-note mono-cell">{{.CurrentVersion}}</span></div>
+        {{if .Configured}}
+          {{if .Available}}
+          <div><span>Available</span><span class="row-note"><strong class="mono-cell">{{.LatestVersion}}</strong> · published {{.PublishedAt}}</span></div>
+          {{else}}
+          <div><span>Latest</span><span class="row-note">No newer unskipped release found</span></div>
+          {{end}}
+          <div><span>Last checked</span><span class="row-note">{{.LastChecked}}</span></div>
+        {{else}}
+          <div><span>Release source</span><span class="row-note">Not configured in this build</span></div>
+        {{end}}
+      </div>
+      {{if .LastError}}<p class="error" role="alert">Last check failed: {{.LastError}}</p>{{end}}
+      {{if .Configured}}
+      <form action="/settings/updates/check" method="post" class="save-row">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button class="btn quiet" type="submit"{{if or .Checking .Applying}} disabled{{end}}>{{if .Checking}}Checking…{{else}}Check now{{end}}</button>
+      </form>
+      {{end}}
+    </div>
+
+    {{if .Available}}
+    <div class="panel-card">
+      <div class="card-title">{{.LatestVersion}}</div>
+      <p class="card-sub">{{.Notes}}</p>
+      <div class="save-row">
+        <form action="/settings/updates/skip" method="post">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button class="btn quiet" type="submit"{{if .Applying}} disabled{{end}}>Skip this version</button>
+        </form>
+        <form action="/settings/updates/apply" method="post" data-confirm="Install {{.LatestVersion}} now? Wispdeck will take a backup and restart.">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button class="btn" type="submit"{{if .Applying}} disabled{{end}}>{{if .Applying}}Preparing update…{{else}}Update now{{end}}</button>
+        </form>
+      </div>
+    </div>
+    {{end}}
+
+    {{if .SkippedVersion}}
+    <div class="notice">
+      <span>{{.SkippedVersion}} is skipped.</span>
+      <form action="/settings/updates/unskip" method="post">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button class="text-button" type="submit">Offer it again</button>
+      </form>
+    </div>
+    {{end}}
+
+    <div class="panel-card">
+      <div class="card-title">Update policy</div>
+      <p class="card-sub">Automatic mode downloads only a correctly signed stable release, backs up all state, and restarts Wispdeck.</p>
+      <form action="/settings/updates/mode" method="post" class="form-stack">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label class="radio-option"><input type="radio" name="mode" value="automatic"{{if eq .Mode "automatic"}} checked{{end}}> <span><strong>Automatic</strong><small>Install new stable releases after discovery.</small></span></label>
+        <label class="radio-option"><input type="radio" name="mode" value="notify"{{if eq .Mode "notify"}} checked{{end}}> <span><strong>Notify me</strong><small>Show the banner and wait for a superuser.</small></span></label>
+        <label class="radio-option"><input type="radio" name="mode" value="disabled"{{if eq .Mode "disabled"}} checked{{end}}> <span><strong>Disabled</strong><small>Do not contact the release source.</small></span></label>
+        <div class="save-row"><button class="btn" type="submit">Save policy</button></div>
+      </form>
+    </div>
+  </main>
+
+  {{template "app_footer" .CSRFToken}}
+</body>
+</html>{{end}}

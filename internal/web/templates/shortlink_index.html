@@ -1,18 +1,18 @@
 {{define "shortlink_index.html"}}<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{template "head_assets"}}
   <title>Shared links — Wispdeck</title>
-  <link rel="stylesheet" href="/assets/admin.css">
 </head>
 <body>
-  <main class="panel">
-    <h1>Shared links</h1>
-    <p class="subtle">Available from /{{.Slug}}</p>
-    <ul class="public-links">
-      {{range .Destinations}}<li><a href="{{.URL}}" rel="noreferrer">{{.Label}}</a><span class="subtle">{{.URL}}</span></li>{{end}}
-    </ul>
+  <main class="public-main">
+    <div class="public-card">
+      <h1>Shared links</h1>
+      <p class="public-sub">/{{.Slug}}</p>
+      <ul class="public-links">
+        {{range .Destinations}}<li><a href="{{.URL}}" rel="noreferrer">{{.Label}}</a><span class="subtle">{{.URL}}</span></li>{{end}}
+      </ul>
+    </div>
   </main>
 </body>
 </html>{{end}}

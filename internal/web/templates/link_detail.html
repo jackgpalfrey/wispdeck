@@ -1,0 +1,162 @@
+{{define "destination-row"}}
+<div class="destination-row" data-destination-row>
+  <label class="field destination-url">Destination URL
+    <input name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" value="{{.URL}}" placeholder="https://example.com/something-useful" required>
+  </label>
+  <label class="field destination-label" data-public-label>Public label <span class="optional">Optional</span>
+    <input name="target_label" autocomplete="off" maxlength="120" value="{{.Label}}" placeholder="Documentation">
+  </label>
+  <button type="button" class="btn quiet compact remove-destination" data-remove-destination aria-label="Remove this destination">Remove</button>
+</div>
+{{end}}
+
+{{define "mode-options"}}
+<div class="mode-options" role="radiogroup" aria-label="Link behaviour">
+  <label class="mode-option">
+    <input type="radio" name="mode" value="redirect"{{if eq . "redirect"}} checked{{end}}>
+    <span class="mode-title">Redirect</span>
+    <span class="mode-copy">Send visitors straight to one URL</span>
+  </label>
+  <label class="mode-option">
+    <input type="radio" name="mode" value="index"{{if eq . "index"}} checked{{end}}>
+    <span class="mode-title">Link page</span>
+    <span class="mode-copy">Show a tidy list of destinations</span>
+  </label>
+  <label class="mode-option">
+    <input type="radio" name="mode" value="open_all"{{if eq . "open_all"}} checked{{end}}>
+    <span class="mode-title">Open all</span>
+    <span class="mode-copy">Try to open every URL in new tabs</span>
+  </label>
+</div>
+{{end}}
+
+{{define "link_detail.html"}}<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  {{template "head_assets"}}
+  <title>{{.Display}} — Wispdeck</title>
+</head>
+<body>
+  {{template "app_header" .Shell}}
+
+  <main class="page w-detail">
+    <a class="backlink" href="/">← My Links</a>
+
+    <div class="detail-head">
+      <span class="detail-title">{{.Display}}</span>
+      {{if .Link.Expired}}<span class="pill warn">expired</span>{{else if not .Link.Enabled}}<span class="pill warn">disabled</span>{{else}}<span class="pill live">● active</span>{{end}}
+      <span class="pill">{{.Link.ModeLabel}}</span>
+      <button type="button" class="btn quiet compact" data-copy="{{.Link.PublicURL}}">copy link</button>
+      <a class="btn quiet compact" href="{{.Link.PublicURL}}" target="_blank" rel="noreferrer">Visit ↗</a>
+      <form action="/links/state" method="post" class="spacer">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="link_id" value="{{.Link.ID}}">
+        {{if .Link.Enabled}}
+        <input type="hidden" name="enabled" value="false">
+        <button type="submit" class="btn quiet compact">Pause link</button>
+        {{else}}
+        <input type="hidden" name="enabled" value="true">
+        <button type="submit" class="btn quiet compact">Reactivate link</button>
+        {{end}}
+      </form>
+    </div>
+    {{if .Link.Title}}<div class="detail-dest"><strong>{{.Link.Title}}</strong></div>{{end}}
+    <div class="detail-dest">→ {{.PrimaryDest}}{{if .ExtraDestCount}} <span class="faint">+{{.ExtraDestCount}} more</span>{{end}}</div>
+
+    <div class="detail-stats">
+      <div><span class="n">{{.Link.VisitCount}}</span> visit{{if ne .Link.VisitCount 1}}s{{end}} · all time</div>
+      <div><span class="n">{{.Total30}}</span> · 30d</div>
+      <div><span class="n">{{.Today}}</span> today</div>
+      <div>created <span class="v">{{.Link.CreatedAt}}</span></div>
+      <div>expires <span class="v{{if .Link.Expired}} warn{{end}}">{{.Link.ExpiresAt}}</span></div>
+      {{if .OwnerUsername}}<div>owner <span class="v">{{.OwnerUsername}}</span></div>{{end}}
+    </div>
+
+    <div class="panel-card">
+      <p class="card-label">Visits · last 30 days</p>
+      <div class="chart">
+        {{range .Bars}}<span class="ch-{{.H}}" title="{{.Tip}}"></span>{{end}}
+      </div>
+      <div class="chart-range"><span>{{.ChartStart}}</span><span>{{.ChartEnd}}</span></div>
+    </div>
+
+    <div class="panel-card form-stack">
+      <p class="card-label">Edit link</p>
+      <form action="/links/update" method="post" class="on-card" data-link-form data-current-mode="{{.Link.Mode}}">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="hidden" name="link_id" value="{{.Link.ID}}">
+
+        <fieldset class="destinations-editor" data-destinations-editor>
+          <legend class="sr-only">Link destinations</legend>
+          <div class="destination-rows" data-destination-rows>
+            {{range .Link.Destinations}}{{template "destination-row" .}}{{end}}
+          </div>
+          <button type="button" class="add-destination" data-add-destination><span aria-hidden="true">+</span> Add another destination</button>
+          <p class="helper" data-destination-helper></p>
+        </fieldset>
+
+        <details class="progressive-panel behavior-panel" data-behavior-panel{{if ne .Link.Mode "redirect"}} open{{end}}>
+          <summary>
+            <span><strong>Link behaviour</strong> <small data-mode-summary>{{.Link.ModeLabel}}</small></span>
+            <span class="summary-action">Change</span>
+          </summary>
+          <div class="progressive-content">
+            {{template "mode-options" .Link.Mode}}
+            <p class="helper" data-mode-explanation></p>
+          </div>
+        </details>
+
+        <details class="progressive-panel"{{if or .Link.Title .Link.Description .Link.ExpiresInput}} open{{end}}>
+          <summary>
+            <span><strong>Details and expiry</strong> <small>Private management information</small></span>
+            <span class="summary-action"><span class="when-closed">Show</span><span class="when-open">Hide</span></span>
+          </summary>
+          <div class="progressive-content advanced-grid">
+            <label class="field">Private title <span class="optional">Optional</span>
+              <input name="title" autocomplete="off" maxlength="120" value="{{.Link.Title}}">
+            </label>
+            <label class="field">Expiry <span class="optional">Optional · UTC</span>
+              <input name="expires_at" type="datetime-local" value="{{.Link.ExpiresInput}}">
+            </label>
+            <label class="field full-width">Private notes <span class="optional">Optional · never public</span>
+              <textarea name="description" maxlength="1000" rows="3">{{.Link.Description}}</textarea>
+            </label>
+            <p class="helper full-width">The short path <strong>/{{.Link.Slug}}</strong> is permanent. Retire this link and create another to use a different path.</p>
+          </div>
+        </details>
+
+        <div class="save-row">
+          <button type="submit" class="btn compact" data-create-button>Save changes</button>
+        </div>
+      </form>
+
+      <details class="danger-panel">
+        <summary>Danger zone</summary>
+        <div class="danger-content">
+          <p>Retiring a link permanently reserves <strong>/{{.Link.Slug}}</strong>. Nobody can reuse it later.</p>
+          <form action="/links/retire" method="post">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <input type="hidden" name="link_id" value="{{.Link.ID}}">
+            <label class="confirmation"><input type="checkbox" name="confirm" value="yes" required> I understand this short path cannot be reused</label>
+            <button type="submit" class="btn danger compact">Retire link</button>
+          </form>
+        </div>
+      </details>
+    </div>
+  </main>
+
+  {{template "app_footer" .CSRFToken}}
+
+  <template id="destination-row-template">
+    <div class="destination-row" data-destination-row>
+      <label class="field destination-url">Destination URL
+        <input name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" placeholder="https://example.com/something-useful" required>
+      </label>
+      <label class="field destination-label" data-public-label>Public label <span class="optional">Optional</span>
+        <input name="target_label" autocomplete="off" maxlength="120" placeholder="Documentation">
+      </label>
+      <button type="button" class="btn quiet compact remove-destination" data-remove-destination aria-label="Remove this destination">Remove</button>
+    </div>
+  </template>
+</body>
+</html>{{end}}

@@ -1,17 +1,24 @@
 {{define "message.html"}}<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{template "head_assets"}}
   <title>{{.Title}} — Wispdeck</title>
-  <link rel="stylesheet" href="/assets/admin.css">
 </head>
 <body>
-  <main class="panel">
-    <h1>{{.Title}}</h1>
-    <p>{{.Message}}</p>
-    <p><a href="/login">Sign in</a></p>
+  <main class="auth-main">
+    <div class="auth-box">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">w</span>
+        <span>Wispdeck</span>
+      </a>
+      <div class="auth-card on-card">
+        <div>
+          <h1>{{.Title}}</h1>
+          <p class="auth-sub">{{.Message}}</p>
+        </div>
+      </div>
+      <p class="auth-foot"><a href="/login">Sign in</a></p>
+    </div>
   </main>
 </body>
 </html>{{end}}
-

@@ -45,6 +45,7 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 		`PRAGMA foreign_keys = ON`,
 		`PRAGMA busy_timeout = 5000`,
 		`PRAGMA journal_mode = WAL`,
+		`PRAGMA secure_delete = ON`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return cleanup(fmt.Errorf("configure database: %w", err))

@@ -135,6 +135,15 @@ session revocation, and superuser account-management actions are audited
 without recording passwords, setup tokens, one-time codes, or WebAuthn
 challenge material.
 
+Failed password checks for existing accounts are audited. Unknown usernames
+take the same dummy-hash verification path and receive the same response, but
+are not written to the audit table; this prevents unauthenticated callers from
+creating unbounded persistent rows. At startup and every six hours Wispdeck
+deletes expired authentication transactions and ceremonies. Audit events are
+bounded by both age and count: 90 days and the newest 100,000 records by
+default, configurable with `--auth-event-retention-days` and
+`--max-auth-events`.
+
 Forwarding headers are ignored unless the immediate peer matches an explicitly
 configured trusted-proxy CIDR. When trusted, the effective client address is
 the rightmost untrusted address in the forwarding chain.

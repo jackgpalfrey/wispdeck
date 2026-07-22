@@ -18,7 +18,7 @@ type fakeRepository struct {
 	flushErr error
 }
 
-func (f *fakeRepository) CreateShortLink(_ context.Context, owner string, link Link, now time.Time) (Link, error) {
+func (f *fakeRepository) CreateShortLink(_ context.Context, owner string, link Link, _ Limits, now time.Time) (Link, error) {
 	link.ID = "0123456789abcdef0123456789abcdef"
 	link.OwnerUserID = owner
 	link.Enabled = true
@@ -77,6 +77,7 @@ func TestNormalizeSlug(t *testing.T) {
 		{input: "trailing-", err: ErrInvalidSlug},
 		{input: "not_ok", err: ErrInvalidSlug},
 		{input: "login", err: ErrReservedSlug},
+		{input: "healthz", err: ErrReservedSlug},
 		{input: "SECURITY", err: ErrReservedSlug},
 	}
 	for _, test := range tests {
@@ -143,7 +144,7 @@ func TestRandomSlugUsesValidAlphabet(t *testing.T) {
 
 func TestServiceValidatesAndNormalizesRichLinkInput(t *testing.T) {
 	repository := &fakeRepository{}
-	service, err := NewService(repository)
+	service, err := NewService(repository, DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +224,7 @@ func TestServiceBuffersVisitsOverlaysStatsAndRestoresFailedFlush(t *testing.T) {
 			LinkID: linkID, Day: utcDay(now), Visits: 3, LastVisitedAt: now.Add(-time.Minute),
 		}},
 	}
-	service, err := NewService(repository)
+	service, err := NewService(repository, DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}

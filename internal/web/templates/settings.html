@@ -1,0 +1,106 @@
+{{define "settings.html"}}<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  {{template "head_assets"}}
+  <title>Settings — Wispdeck</title>
+</head>
+<body>
+  {{template "app_header" .Shell}}
+
+  <main class="page w-mid settings-stack">
+    <div class="page-intro">
+      <h1>Settings</h1>
+    </div>
+
+	<div class="panel-card">
+	  <div class="card-title">Instance limits</div>
+	  <p class="card-sub">Storage and resource ceilings configured by this Wispdeck operator.</p>
+	  <dl class="kv limit-grid">
+		<div><dt>short-link names</dt><dd>{{.MaxLinks}} reserved per user</dd></div>
+		<div><dt>hosted sites</dt><dd>{{.MaxSites}} per user</dd></div>
+		<div><dt>site releases</dt><dd>{{.MaxReleases}} retained per site</dd></div>
+		<div><dt>release storage</dt><dd>{{.MaxSiteStorage}} per user</dd></div>
+		<div><dt>live Wispist data</dt><dd>{{.MaxWispistLive}} per site</dd></div>
+		<div><dt>draft Wispist data</dt><dd>{{.MaxWispistDraft}} per site</dd></div>
+	  </dl>
+	</div>
+
+    <div class="panel-card">
+      <div class="card-title">Domains</div>
+      <p class="card-sub">Domains this instance serves short links and sites on. Configured with the <code>--app-origin</code>, <code>--site-domain</code> and <code>--preview-domain</code> serve flags.</p>
+      <div class="card-rows">
+        <div>
+          <span class="mono-cell">{{.AppHost}}</span>
+          <span class="pill live">primary</span>
+          <span class="row-note">application + short links</span>
+        </div>
+        <div>
+          <span class="mono-cell">*.{{.SiteDomain}}</span>
+          <span class="row-note">hosted sites · wildcard</span>
+        </div>
+        <div>
+          <span class="mono-cell">*.{{.PreviewDomain}}</span>
+          <span class="row-note">isolated draft previews</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-card">
+      <div class="card-title">Account</div>
+      <p class="card-sub">Signed in as <strong>{{.Username}}</strong> · {{.Role}}</p>
+      <div class="card-rows">
+        <div>
+          <span>Passkeys, authenticator app, sessions and sign-in activity</span>
+          <span class="row-note"><a href="/security/passkeys">Security settings</a></span>
+        </div>
+        <div>
+          <span>Change your password (signs out every device)</span>
+          <span class="row-note"><a href="/security/password">Change password</a></span>
+        </div>
+      </div>
+    </div>
+
+    {{if .IsSuperuser}}
+    <div class="panel-card">
+      <div class="card-title">Updates</div>
+      {{if .UpdatesConfigured}}
+      <p class="card-sub">Signed stable releases only.{{if .UpdateAvailable}} Wispdeck {{.UpdateVersion}} is available.{{end}}</p>
+      {{else}}
+      <p class="card-sub">This build does not contain a release manifest URL and signing key.</p>
+      {{end}}
+      <div class="card-rows">
+        <div>
+          <span>{{if .UpdateAvailable}}Update available{{else if .UpdatesConfigured}}Release updates configured{{else}}Updates not configured{{end}}</span>
+          <span class="row-note"><a href="/settings/updates">Update settings</a></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-card">
+      <div class="card-title">Users</div>
+      <p class="card-sub">Create accounts, hand out one-use setup links, and manage roles for this instance.</p>
+      <div class="card-rows">
+        <div>
+          <span>Everyone with access to this Wispdeck installation</span>
+          <span class="row-note"><a href="/settings/users">Manage users</a></span>
+        </div>
+      </div>
+    </div>
+    {{end}}
+
+    <div class="panel-card">
+      <div class="toggle-row">
+        <div>
+          <div class="card-title">Appearance</div>
+          <p class="card-sub">Theme for this browser.</p>
+        </div>
+        <button type="button" class="btn quiet compact" data-theme-toggle>
+          <span class="theme-icon-light">Switch to dark</span><span class="theme-icon-dark">Switch to light</span>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  {{template "app_footer" .CSRFToken}}
+</body>
+</html>{{end}}

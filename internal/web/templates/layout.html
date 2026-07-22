@@ -1,0 +1,46 @@
+{{define "head_assets"}}<meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/assets/admin.css">
+  <script src="/assets/theme.js"></script>
+  <script src="/assets/app.js" defer></script>{{end}}
+
+{{define "theme_button"}}<button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle colour theme"><span class="theme-icon-light">◐</span><span class="theme-icon-dark">☀</span></button>{{end}}
+
+{{define "app_header"}}
+  <header class="shell-header">
+    <a class="brand" href="/" aria-label="Wispdeck home">
+      <span class="brand-mark" aria-hidden="true">{{.Initial}}</span>
+      <span>{{.Brand}}</span>
+    </a>
+    <nav class="nav-tabs" aria-label="Main navigation">
+      <a href="/"{{if eq .Tab "home"}} aria-current="page"{{end}}>My Links</a>
+      <a href="/settings"{{if eq .Tab "settings"}} aria-current="page"{{end}}>Settings</a>
+    </nav>
+    <div class="header-tools">
+      {{template "theme_button"}}
+      <a class="user-chip" href="/security/passkeys" title="{{.Username}} · account security">{{.UserInitial}}</a>
+    </div>
+  </header>
+  {{if .UpdateApplying}}
+  <div class="global-update-banner" role="status">
+    <strong>Wispdeck {{.UpdateVersion}} is ready.</strong>
+    <span>The server is preparing to restart.</span>
+  </div>
+  {{else if .UpdateAvailable}}
+  <div class="global-update-banner">
+    <strong>Wispdeck {{.UpdateVersion}} is available.</strong>
+    <a href="/settings/updates">Review update →</a>
+  </div>
+  {{end}}
+{{end}}
+
+{{define "app_footer"}}
+  <footer class="app-footer">
+    <span>wispdeck</span>
+    <a href="https://github.com/wispdeck/wispdeck" rel="noreferrer">github</a>
+    <form action="/logout" method="post">
+      <input type="hidden" name="csrf_token" value="{{.}}">
+      <button type="submit" class="text-button">Sign out</button>
+    </form>
+  </footer>
+{{end}}

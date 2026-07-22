@@ -16,13 +16,16 @@ import (
 )
 
 const (
-	MaxTitleLength       = 120
-	MaxUploadBytes       = 20 << 20
-	MaxBundleBytes       = 50 << 20
-	MaxFileBytes         = 10 << 20
-	MaxFiles             = 500
-	PreviewGrantLifetime = 2 * time.Minute
-	PreviewLifetime      = 8 * time.Hour
+	MaxTitleLength                = 120
+	MaxUploadBytes                = 20 << 20
+	MaxBundleBytes                = 50 << 20
+	MaxFileBytes                  = 10 << 20
+	MaxFiles                      = 500
+	PreviewGrantLifetime          = 2 * time.Minute
+	PreviewLifetime               = 8 * time.Hour
+	DefaultMaxSitesPerUser        = 100
+	DefaultMaxReleasesPerSite     = 25
+	DefaultMaxStorageBytesPerUser = 1 << 30
 )
 
 var (
@@ -37,7 +40,25 @@ var (
 	ErrInvalidFile     = errors.New("bundle contains an invalid file")
 	ErrNoDraft         = errors.New("site has no draft release")
 	ErrInvalidPreview  = errors.New("preview access is invalid or expired")
+	ErrSiteLimit       = errors.New("site limit reached")
+	ErrReleaseLimit    = errors.New("release limit reached for this site")
+	ErrStorageLimit    = errors.New("hosted-site storage limit reached")
+	ErrSelectedRelease = errors.New("the current draft or published release cannot be deleted")
 )
+
+type Limits struct {
+	MaxSitesPerUser        int
+	MaxReleasesPerSite     int
+	MaxStorageBytesPerUser int64
+}
+
+func DefaultLimits() Limits {
+	return Limits{
+		MaxSitesPerUser:        DefaultMaxSitesPerUser,
+		MaxReleasesPerSite:     DefaultMaxReleasesPerSite,
+		MaxStorageBytesPerUser: DefaultMaxStorageBytesPerUser,
+	}
+}
 
 type Actor struct {
 	UserID    string
@@ -82,6 +103,14 @@ type Site struct {
 	Releases           []Release
 }
 
+type Usage struct {
+	SiteReleases int
+	SiteBytes    int64
+	OwnerSites   int
+	OwnerBytes   int64
+	Limits       Limits
+}
+
 type Preview struct {
 	Site               Site
 	DraftReleaseID     string
@@ -95,11 +124,14 @@ type PreviewGrant struct {
 }
 
 type Repository interface {
-	CreateSite(context.Context, string, string, string, time.Time) (Site, error)
+	CreateSite(context.Context, string, string, string, Limits, time.Time) (Site, error)
 	Sites(context.Context, string, bool) ([]Site, error)
-	CreateSiteRelease(context.Context, string, bool, string, Bundle, time.Time) (Release, error)
+	CreateSiteRelease(context.Context, string, bool, string, Bundle, Limits, time.Time) (Release, error)
 	PublishSiteRelease(context.Context, string, bool, string, string, time.Time) error
 	SetSiteEnabled(context.Context, string, bool, string, bool, time.Time) error
+	SiteUsage(context.Context, string, bool, string) (Usage, error)
+	DeleteSiteRelease(context.Context, string, bool, string, string, time.Time) error
+	PurgeSiteContent(context.Context, string, bool, string, time.Time) error
 	SiteByName(context.Context, string) (Site, error)
 	SiteFile(context.Context, string, string) (File, error)
 	CreateSitePreviewGrant(context.Context, string, bool, string, string, [32]byte, time.Time, time.Time) error
@@ -109,15 +141,25 @@ type Repository interface {
 
 type Service struct {
 	repository Repository
+	limits     Limits
 	now        func() time.Time
 }
 
-func NewService(repository Repository) (*Service, error) {
+func NewService(repository Repository, limits Limits) (*Service, error) {
 	if repository == nil {
 		return nil, errors.New("site repository is required")
 	}
-	return &Service{repository: repository, now: time.Now}, nil
+	if limits == (Limits{}) {
+		limits = DefaultLimits()
+	}
+	if limits.MaxSitesPerUser < 1 || limits.MaxReleasesPerSite < 2 ||
+		limits.MaxStorageBytesPerUser < MaxBundleBytes {
+		return nil, errors.New("site limits are invalid")
+	}
+	return &Service{repository: repository, limits: limits, now: time.Now}, nil
 }
+
+func (s *Service) Limits() Limits { return s.limits }
 
 func (s *Service) Create(ctx context.Context, actor Actor, name, title string) (Site, error) {
 	if actor.UserID == "" {
@@ -131,7 +173,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, name, title string) (
 	if err != nil {
 		return Site{}, err
 	}
-	return s.repository.CreateSite(ctx, actor.UserID, name, title, s.now().UTC())
+	return s.repository.CreateSite(ctx, actor.UserID, name, title, s.limits, s.now().UTC())
 }
 
 func (s *Service) List(ctx context.Context, actor Actor) ([]Site, error) {
@@ -148,7 +190,7 @@ func (s *Service) Upload(ctx context.Context, actor Actor, siteID string, bundle
 	if err := ValidateBundle(bundle); err != nil {
 		return Release{}, err
 	}
-	return s.repository.CreateSiteRelease(ctx, actor.UserID, actor.Superuser, siteID, bundle, s.now().UTC())
+	return s.repository.CreateSiteRelease(ctx, actor.UserID, actor.Superuser, siteID, bundle, s.limits, s.now().UTC())
 }
 
 func (s *Service) Publish(ctx context.Context, actor Actor, siteID, releaseID string) error {
@@ -163,6 +205,37 @@ func (s *Service) SetEnabled(ctx context.Context, actor Actor, siteID string, en
 		return ErrNotFound
 	}
 	return s.repository.SetSiteEnabled(ctx, actor.UserID, actor.Superuser, siteID, enabled, s.now().UTC())
+}
+
+func (s *Service) Usage(ctx context.Context, actor Actor, siteID string) (Usage, error) {
+	if actor.UserID == "" || !validID(siteID) {
+		return Usage{}, ErrNotFound
+	}
+	usage, err := s.repository.SiteUsage(ctx, actor.UserID, actor.Superuser, siteID)
+	if err != nil {
+		return Usage{}, err
+	}
+	usage.Limits = s.limits
+	return usage, nil
+}
+
+func (s *Service) DeleteRelease(ctx context.Context, actor Actor, siteID, releaseID string) error {
+	if actor.UserID == "" || !validID(siteID) || !validID(releaseID) {
+		return ErrNotFound
+	}
+	return s.repository.DeleteSiteRelease(
+		ctx, actor.UserID, actor.Superuser, siteID, releaseID, s.now().UTC(),
+	)
+}
+
+// PurgeContent removes every release while retaining the site and its public
+// name for the original owner. An embedding host should take the site offline
+// with this operation before separately purging associated data stores.
+func (s *Service) PurgeContent(ctx context.Context, actor Actor, siteID string) error {
+	if actor.UserID == "" || !validID(siteID) {
+		return ErrNotFound
+	}
+	return s.repository.PurgeSiteContent(ctx, actor.UserID, actor.Superuser, siteID, s.now().UTC())
 }
 
 func (s *Service) SiteByName(ctx context.Context, name string) (Site, error) {

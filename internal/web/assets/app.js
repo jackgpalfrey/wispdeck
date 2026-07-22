@@ -1,6 +1,99 @@
 "use strict";
 
-document.documentElement.classList.add("js");
+/* ---------- explicit destructive confirmations ---------- */
+
+document.addEventListener("submit", (event) => {
+  const form = event.target.closest("form[data-confirm]");
+  if (form && !window.confirm(form.dataset.confirm)) {
+    event.preventDefault();
+  }
+});
+
+/* ---------- copy buttons ---------- */
+
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-copy]");
+  if (!button) {
+    return;
+  }
+  event.preventDefault();
+  const original = button.textContent;
+  try {
+    await navigator.clipboard.writeText(button.dataset.copy);
+    button.textContent = "copied";
+    button.classList.add("copied");
+  } catch {
+    button.textContent = "failed";
+  }
+  window.setTimeout(() => {
+    button.textContent = original;
+    button.classList.remove("copied");
+  }, 1400);
+});
+
+/* ---------- upload dropzones: reflect the chosen file ---------- */
+
+for (const drop of document.querySelectorAll(".upload-drop")) {
+  const input = drop.querySelector('input[type="file"]');
+  const label = drop.querySelector("[data-drop-label]");
+  if (!input || !label) {
+    continue;
+  }
+  const original = label.textContent;
+  input.addEventListener("change", () => {
+    const file = input.files && input.files[0];
+    if (file) {
+      const size = file.size >= 1 << 20 ? `${(file.size / (1 << 20)).toFixed(1)} MiB` : `${Math.max(1, Math.round(file.size / 1024))} KiB`;
+      label.textContent = `✓ ${file.name} · ${size} — click Upload draft`;
+      drop.classList.add("has-file");
+    } else {
+      label.textContent = original;
+      drop.classList.remove("has-file");
+    }
+  });
+}
+
+/* ---------- dashboard: type chips + search filter ---------- */
+
+const rows = [...document.querySelectorAll("[data-row]")];
+if (rows.length > 0 || document.querySelector("[data-filter]")) {
+  const chips = [...document.querySelectorAll("[data-chip]")];
+  const filter = document.querySelector("[data-filter]");
+  const empty = document.querySelector("[data-filter-empty]");
+  const status = document.querySelector("[data-filter-status]");
+  let kind = "all";
+
+  const apply = () => {
+    const query = (filter?.value || "").trim().toLocaleLowerCase();
+    let visible = 0;
+    for (const row of rows) {
+      const matchesKind = kind === "all" || row.dataset.row === kind;
+      const matchesQuery = query === "" || (row.dataset.search || row.textContent).toLocaleLowerCase().includes(query);
+      const show = matchesKind && matchesQuery;
+      row.hidden = !show;
+      if (show) {
+        visible += 1;
+      }
+    }
+    empty?.classList.toggle("hidden", visible !== 0 || rows.length === 0);
+    if (status) {
+      status.textContent = query === "" && kind === "all" ? "" : `${visible} matching ${visible === 1 ? "entry" : "entries"}`;
+    }
+  };
+
+  for (const chip of chips) {
+    chip.addEventListener("click", () => {
+      kind = chip.dataset.chip;
+      for (const other of chips) {
+        other.setAttribute("aria-pressed", other === chip ? "true" : "false");
+      }
+      apply();
+    });
+  }
+  filter?.addEventListener("input", apply);
+}
+
+/* ---------- link forms: destinations editor + behaviour modes ---------- */
 
 const destinationTemplate = document.querySelector("#destination-row-template");
 
@@ -124,7 +217,7 @@ for (const form of document.querySelectorAll("[data-link-form]")) {
     const submit = form.querySelector("[data-create-button]");
     if (submit) {
       submit.disabled = true;
-      submit.textContent = "Creating link…";
+      submit.textContent = "Working…";
     }
   });
 
@@ -135,44 +228,3 @@ const formError = document.querySelector("[data-form-error]");
 if (formError) {
   formError.closest("form")?.querySelector("input:not([type='hidden'])")?.focus();
 }
-
-const filter = document.querySelector("[data-link-filter]");
-const records = [...document.querySelectorAll("[data-link-record]")];
-if (filter && records.length > 0) {
-  const empty = document.querySelector("[data-filter-empty]");
-  const status = document.querySelector("[data-filter-status]");
-  filter.addEventListener("input", () => {
-    const query = filter.value.trim().toLocaleLowerCase();
-    let visible = 0;
-    for (const record of records) {
-      const matches = query === "" || record.textContent.toLocaleLowerCase().includes(query);
-      record.hidden = !matches;
-      if (matches) {
-        visible += 1;
-      }
-    }
-    empty?.classList.toggle("hidden", visible !== 0);
-    if (status) {
-      status.textContent = query === "" ? "" : `${visible} matching ${visible === 1 ? "link" : "links"}`;
-    }
-  });
-}
-
-document.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-copy]");
-  if (!button) {
-    return;
-  }
-  const original = button.textContent;
-  try {
-    await navigator.clipboard.writeText(button.dataset.copy);
-    button.textContent = "Copied!";
-    button.classList.add("copied");
-  } catch {
-    button.textContent = "Copy failed";
-  }
-  window.setTimeout(() => {
-    button.textContent = original;
-    button.classList.remove("copied");
-  }, 1600);
-});

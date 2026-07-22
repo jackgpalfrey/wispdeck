@@ -1,0 +1,34 @@
+{{define "site_new.html"}}<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  {{template "head_assets"}}
+  <title>New site — Wispdeck</title>
+</head>
+<body>
+  {{template "app_header" .Shell}}
+
+  <main class="page w-narrow">
+    <a class="backlink" href="/">← My Links</a>
+    <div class="page-intro">
+      <h1>New site</h1>
+      <p>Host a lightweight static site on a {{.SiteDomain}} subdomain.</p>
+    </div>
+
+    <div class="panel-card on-card form-stack">
+      <form action="/sites/create" method="post">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label class="field">Subdomain
+          <span class="input-affix"><input class="affix-leads" name="name" autocomplete="off" maxlength="48" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?" placeholder="my-site" required autofocus><span class="suffix">.{{.SiteDomain}}</span></span>
+        </label>
+        <label class="field">Private title <span class="optional">Optional</span>
+          <input name="title" autocomplete="off" maxlength="120" placeholder="My useful little site">
+        </label>
+        <p class="helper">The name is shared with short links and stays reserved to your account. After creating the site, upload a ZIP bundle as its first private draft — nothing is public until you publish.</p>
+        <button type="submit" class="btn">Create site</button>
+      </form>
+    </div>
+  </main>
+
+  {{template "app_footer" .CSRFToken}}
+</body>
+</html>{{end}}

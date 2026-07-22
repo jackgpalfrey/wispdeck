@@ -1,507 +1,108 @@
-{{define "destination-row"}}
-<div class="destination-row" data-destination-row>
-  <label class="destination-url">
-    <span class="field-label">Destination URL</span>
-    <input name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" value="{{.URL}}" placeholder="https://example.com/something-useful" required>
-  </label>
-  <label class="destination-label" data-public-label>
-    <span class="field-label">Public label <span class="optional">Optional</span></span>
-    <input name="target_label" autocomplete="off" maxlength="120" value="{{.Label}}" placeholder="Documentation">
-  </label>
-  <button type="button" class="button ghost compact remove-destination" data-remove-destination aria-label="Remove this destination">Remove</button>
-</div>
-{{end}}
-
-{{define "mode-options"}}
-<div class="mode-options" role="radiogroup" aria-label="Link behaviour">
-  <label class="mode-option">
-    <input type="radio" name="mode" value="redirect"{{if eq . "redirect"}} checked{{end}}>
-    <span class="mode-title">Redirect</span>
-    <span class="mode-copy">Send visitors straight to one URL</span>
-  </label>
-  <label class="mode-option">
-    <input type="radio" name="mode" value="index"{{if eq . "index"}} checked{{end}}>
-    <span class="mode-title">Link page</span>
-    <span class="mode-copy">Show a tidy list of destinations</span>
-  </label>
-  <label class="mode-option">
-    <input type="radio" name="mode" value="open_all"{{if eq . "open_all"}} checked{{end}}>
-    <span class="mode-title">Open all</span>
-    <span class="mode-copy">Try to open every URL in new tabs</span>
-  </label>
-</div>
-{{end}}
-
 {{define "dashboard.html"}}<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Dashboard — Wispdeck</title>
-  <link rel="stylesheet" href="/assets/admin.css">
-  <script src="/assets/links.js" defer></script>
+  {{template "head_assets"}}
+  <title>My Links — Wispdeck</title>
 </head>
-<body class="dashboard-body">
-  <main class="panel dashboard-shell">
-    <header class="page-header">
-      <a class="brand" href="/" aria-label="Wispdeck home">
-        <span class="brand-mark" aria-hidden="true">W</span>
-        <span>Wispdeck</span>
-      </a>
-      <nav aria-label="Account navigation">
-        <a href="#sites">Sites</a>
-        {{if eq .Role "superuser"}}<a href="/settings/users">Users</a>{{end}}
-        <a href="/security/passkeys">Account</a>
-        <span class="user-chip">{{.Username}}</span>
-      </nav>
-    </header>
+<body>
+  {{template "app_header" .Shell}}
 
-    <div class="dashboard-content">
-      {{if eq .Assurance "password"}}
-        <div class="notice compact-notice">
-          <span>MFA is not enabled. This account uses password-only sign-in.</span>
-          <a href="/security/passkeys">Review security</a>
-        </div>
-      {{end}}
+  <main class="page w-list">
+    {{if eq .Assurance "password"}}
+    <div class="notice">
+      <span>MFA is not enabled. This account uses password-only sign-in.</span>
+      <a href="/security/passkeys">Review security</a>
+    </div>
+    {{end}}
 
-      {{if .CreatedSite}}
-      <div class="success-banner" role="status">
-        <div>
-          <strong>{{.CreatedSite}}.{{.SiteDomain}} is reserved for you</strong>
-          <span class="subtle">Upload a ZIP bundle to create its first private draft.</span>
-        </div>
-        <a class="button ghost compact" href="#sites">Set up site</a>
+    {{if .CreatedURL}}
+    <div class="success-banner" role="status">
+      <span><strong>Your short link is ready</strong></span>
+      <a class="banner-url" href="{{.CreatedURL}}" target="_blank" rel="noreferrer">{{.CreatedDisplay}}</a>
+      <div class="success-actions">
+        <button type="button" class="btn quiet compact" data-copy="{{.CreatedURL}}">copy</button>
+        <a class="btn quiet compact" href="/">dismiss</a>
       </div>
-      {{end}}
+    </div>
+    {{end}}
 
-      {{if .CreatedURL}}
-      <div class="success-banner" role="status">
-        <div>
-          <strong>Your short link is ready</strong>
-          <a href="{{.CreatedURL}}" target="_blank" rel="noreferrer">{{.CreatedURL}}</a>
-        </div>
-        <div class="success-actions">
-          <button type="button" class="button secondary compact" data-copy="{{.CreatedURL}}">Copy link</button>
-          <a class="button ghost compact" href="/">Dismiss</a>
-        </div>
+    <form action="/links/create" method="post">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <input type="hidden" name="mode" value="redirect">
+      <input type="hidden" name="target_label" value="">
+      <div class="bar">
+        <label class="sr-only" for="shorten-url">URL to shorten</label>
+        <input id="shorten-url" name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" placeholder="Paste a long URL to shorten…" value="{{.ShortenPrefill}}"{{if .ShortenPrefill}} autofocus{{end}} required>
+        <button type="submit" class="btn">Shorten</button>
+        <a class="btn ghost" href="/sites/new">+ New site</a>
       </div>
-      {{end}}
-
-      <section class="create-card" aria-labelledby="create-heading">
-        <div class="section-heading create-heading">
-          <div>
-            <span class="eyebrow">Short links</span>
-            <h1 id="create-heading">Make a link easier to share</h1>
-            <p>Paste a destination. Wispdeck will handle the short name.</p>
-          </div>
-        </div>
-
-        <form action="/links/create" method="post" class="create-form" data-link-form data-current-mode="{{.Create.Mode}}">
-          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-          {{if .Create.Error}}<p class="error" role="alert" data-form-error>{{.Create.Error}}</p>{{end}}
-
-          <fieldset class="destinations-editor" data-destinations-editor>
-            <legend class="sr-only">Link destinations</legend>
-            <div data-destination-rows>
-              {{range .Create.Destinations}}{{template "destination-row" .}}{{end}}
-            </div>
-            <button type="button" class="button add-destination" data-add-destination>
-              <span aria-hidden="true">+</span> Add another destination
-            </button>
-            <p class="helper" data-destination-helper>A direct link can have one destination.</p>
-          </fieldset>
-
-          <details class="progressive-panel behavior-panel" data-behavior-panel{{if ne .Create.Mode "redirect"}} open{{end}}>
-            <summary>
-              <span>
-                <strong>Link behaviour</strong>
-                <small data-mode-summary>{{if eq .Create.Mode "index"}}Link page{{else if eq .Create.Mode "open_all"}}Open all{{else}}Direct redirect{{end}}</small>
-              </span>
-              <span class="summary-action">Change</span>
-            </summary>
-            <div class="progressive-content">
-              {{template "mode-options" .Create.Mode}}
-              <p class="helper" data-mode-explanation>Visitors are sent straight to your destination.</p>
-            </div>
-          </details>
-
-          <details class="progressive-panel"{{if or .Create.Slug .Create.Title .Create.Description .Create.ExpiresAt}} open{{end}}>
-            <summary>
-              <span>
-                <strong>Advanced options</strong>
-                <small>Custom path, expiry and private details</small>
-              </span>
-              <span class="summary-action"><span class="when-closed">Show</span><span class="when-open">Hide</span></span>
-            </summary>
-            <div class="progressive-content advanced-grid">
-              <label class="full-width">
-                <span class="field-label">Custom short path <span class="optional">Optional</span></span>
-                <span class="input-prefix"><span>{{.ShortBaseURL}}</span><input name="slug" autocomplete="off" minlength="1" maxlength="48" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?" placeholder="generated" value="{{.Create.Slug}}"></span>
-                <span class="helper">Lowercase letters, numbers and hyphens. Leave blank for a secure random path.</span>
-              </label>
-              <label>
-                <span class="field-label">Private title <span class="optional">Optional</span></span>
-                <input name="title" autocomplete="off" maxlength="120" value="{{.Create.Title}}" placeholder="Release notes">
-              </label>
-              <label>
-                <span class="field-label">Expiry <span class="optional">Optional · UTC</span></span>
-                <input name="expires_at" type="datetime-local" value="{{.Create.ExpiresAt}}">
-              </label>
-              <label class="full-width">
-                <span class="field-label">Private notes <span class="optional">Optional · never public</span></span>
-                <textarea name="description" maxlength="1000" rows="3" placeholder="Anything useful for future you">{{.Create.Description}}</textarea>
-              </label>
-            </div>
-          </details>
-
-          <div class="create-action">
-            <p class="helper">New links are active immediately.</p>
-            <button type="submit" class="button primary" data-create-button>Create short link</button>
-          </div>
-        </form>
-      </section>
-
-      <section class="library" aria-labelledby="library-heading">
-        <div class="section-heading library-heading">
-          <div>
-            <span class="eyebrow">Library</span>
-            <h2 id="library-heading">{{if .ShowOwners}}All short links{{else}}Your short links{{end}}</h2>
-            <p>{{len .Links}} link{{if ne (len .Links) 1}}s{{end}}</p>
-          </div>
-          {{if .Links}}
-          <label class="filter-control">
-            <span class="sr-only">Filter links</span>
-            <input type="search" placeholder="Find a link…" autocomplete="off" data-link-filter>
+      {{if .Create.Error}}<p class="error" role="alert" data-form-error>{{.Create.Error}}</p>{{end}}
+      <details class="options-panel"{{if or .Create.Slug .Create.ExpiresAt .Create.Title}} open{{end}}>
+        <summary>Options <span class="faint">· custom slug, expiry, title</span></summary>
+        <div class="options-body">
+          <label>Custom slug
+            <span class="input-affix"><span>{{.ShortBase}}</span><input name="slug" autocomplete="off" maxlength="48" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?" placeholder="my-link" value="{{.Create.Slug}}"></span>
           </label>
-          {{end}}
+          <label>Expires
+            <input type="datetime-local" name="expires_at" value="{{.Create.ExpiresAt}}">
+          </label>
+          <label>Private title
+            <input name="title" autocomplete="off" maxlength="120" placeholder="optional" value="{{.Create.Title}}">
+          </label>
+          <span class="helper">Leave the slug blank for a secure random one. New links redirect straight to the destination — open a link to add more destinations or change behaviour.</span>
         </div>
-
-        {{if .Links}}
-        <p class="sr-only" aria-live="polite" data-filter-status></p>
-        <ul class="link-list" data-link-list>
-          {{range .Links}}
-          <li class="link-card" data-link-record>
-            <div class="link-card-header">
-              <div class="link-identity">
-                <div class="link-title-row">
-                  <h3>{{if .Title}}{{.Title}}{{else}}/{{.Slug}}{{end}}</h3>
-                  <div class="record-badges">
-                    <span class="status mode">{{.ModeLabel}}</span>
-                    {{if .Expired}}<span class="status disabled"><span class="status-dot"></span>Expired</span>{{else if .Enabled}}<span class="status enabled"><span class="status-dot"></span>Active</span>{{else}}<span class="status disabled"><span class="status-dot"></span>Disabled</span>{{end}}
-                  </div>
-                </div>
-                {{if .Title}}<span class="slug-label">/{{.Slug}}</span>{{end}}
-              </div>
-              <div class="link-actions">
-                <a class="button ghost compact" href="{{.PublicURL}}" target="_blank" rel="noreferrer">Visit</a>
-                <button type="button" class="button secondary compact" data-copy="{{.PublicURL}}">Copy</button>
-              </div>
-            </div>
-
-            <a class="public-url" href="{{.PublicURL}}" target="_blank" rel="noreferrer">{{.PublicURL}}</a>
-            {{if .Description}}<p class="notes">{{.Description}}</p>{{end}}
-            <div class="link-metrics">
-              <span><strong>{{.VisitCount}}</strong> visit{{if ne .VisitCount 1}}s{{end}}</span>
-              <span><strong>{{len .Destinations}}</strong> destination{{if ne (len .Destinations) 1}}s{{end}}</span>
-              <span>Last used <strong>{{.LastVisitedAt}}</strong></span>
-              {{if ne .ExpiresAt "Never"}}<span>Expires <strong>{{.ExpiresAt}}</strong></span>{{end}}
-              {{if $.ShowOwners}}<span>Owner <strong>{{.OwnerUsername}}</strong></span>{{end}}
-            </div>
-
-            <details class="manage-panel">
-              <summary><span>Edit and manage</span><span class="summary-action"><span class="when-closed">Open</span><span class="when-open">Close</span></span></summary>
-              <div class="manage-content">
-                <form action="/links/update" method="post" class="edit-form" data-link-form data-current-mode="{{.Mode}}">
-                  <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                  <input type="hidden" name="link_id" value="{{.ID}}">
-
-                  <fieldset class="destinations-editor" data-destinations-editor>
-                    <legend>Destinations</legend>
-                    <div data-destination-rows>
-                      {{range .Destinations}}{{template "destination-row" .}}{{end}}
-                    </div>
-                    <button type="button" class="button add-destination" data-add-destination><span aria-hidden="true">+</span> Add another destination</button>
-                    <p class="helper" data-destination-helper></p>
-                  </fieldset>
-
-                  <details class="progressive-panel behavior-panel" data-behavior-panel{{if ne .Mode "redirect"}} open{{end}}>
-                    <summary>
-                      <span><strong>Link behaviour</strong><small data-mode-summary>{{.ModeLabel}}</small></span>
-                      <span class="summary-action">Change</span>
-                    </summary>
-                    <div class="progressive-content">
-                      {{template "mode-options" .Mode}}
-                      <p class="helper" data-mode-explanation></p>
-                    </div>
-                  </details>
-
-                  <details class="progressive-panel"{{if or .Title .Description .ExpiresInput}} open{{end}}>
-                    <summary>
-                      <span><strong>Details and expiry</strong><small>Private management information</small></span>
-                      <span class="summary-action"><span class="when-closed">Show</span><span class="when-open">Hide</span></span>
-                    </summary>
-                    <div class="progressive-content advanced-grid">
-                      <label>
-                        <span class="field-label">Private title <span class="optional">Optional</span></span>
-                        <input name="title" autocomplete="off" maxlength="120" value="{{.Title}}">
-                      </label>
-                      <label>
-                        <span class="field-label">Expiry <span class="optional">Optional · UTC</span></span>
-                        <input name="expires_at" type="datetime-local" value="{{.ExpiresInput}}">
-                      </label>
-                      <label class="full-width">
-                        <span class="field-label">Private notes <span class="optional">Optional · never public</span></span>
-                        <textarea name="description" maxlength="1000" rows="3">{{.Description}}</textarea>
-                      </label>
-                      <p class="helper full-width">The short path <strong>/{{.Slug}}</strong> is permanent. Retire this link and create another to use a different path.</p>
-                    </div>
-                  </details>
-
-                  <div class="save-row">
-                    <button type="submit" class="button primary compact">Save changes</button>
-                  </div>
-                </form>
-
-                {{if .DailyStats}}
-                <details class="stats-panel">
-                  <summary><span>Daily visits</span><span class="summary-action">Last 30 days</span></summary>
-                  <div class="table-scroll">
-                    <table>
-                      <thead><tr><th>Date (UTC)</th><th>Visits</th></tr></thead>
-                      <tbody>{{range .DailyStats}}<tr><td>{{.Day}}</td><td>{{.Visits}}</td></tr>{{end}}</tbody>
-                    </table>
-                  </div>
-                </details>
-                {{end}}
-
-                <div class="link-settings-row">
-                  <div>
-                    <strong>{{if .Enabled}}Pause this link{{else}}Reactivate this link{{end}}</strong>
-                    <p>{{if .Enabled}}Visitors will see a not-found page until you reactivate it.{{else}}The link will begin working again immediately.{{end}}</p>
-                  </div>
-                  <form action="/links/state" method="post">
-                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                    <input type="hidden" name="link_id" value="{{.ID}}">
-                    {{if .Enabled}}
-                      <input type="hidden" name="enabled" value="false">
-                      <button type="submit" class="button secondary compact">Disable link</button>
-                    {{else}}
-                      <input type="hidden" name="enabled" value="true">
-                      <button type="submit" class="button secondary compact">Enable link</button>
-                    {{end}}
-                  </form>
-                </div>
-
-                <details class="danger-panel">
-                  <summary>Danger zone</summary>
-                  <div class="danger-content">
-                    <p>Retiring a link permanently reserves <strong>/{{.Slug}}</strong>. Nobody can reuse it later.</p>
-                    <form action="/links/retire" method="post" class="retire-form">
-                      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                      <input type="hidden" name="link_id" value="{{.ID}}">
-                      <label class="confirmation"><input type="checkbox" name="confirm" value="yes" required> I understand this short path cannot be reused</label>
-                      <button type="submit" class="button danger compact">Retire link</button>
-                    </form>
-                  </div>
-                </details>
-              </div>
-            </details>
-          </li>
-          {{end}}
-        </ul>
-        <div class="empty-filter hidden" data-filter-empty>
-          <strong>No matching links</strong>
-          <p>Try another title, path, owner or destination.</p>
-        </div>
-        {{else}}
-          <div class="empty-state">
-            <div class="empty-mark" aria-hidden="true">↗</div>
-            <strong>No short links yet</strong>
-            <p>Paste your first destination above. You can be sharing it in a few seconds.</p>
-          </div>
-        {{end}}
-      </section>
-
-      <section class="sites-section" id="sites" aria-labelledby="sites-heading">
-        <div class="section-heading sites-heading">
-          <div>
-            <span class="eyebrow">Hosting</span>
-            <h2 id="sites-heading">Hosted sites</h2>
-            <p>Static sites with private drafts, atomic publishing and no idle runtime.</p>
-          </div>
-          <span class="site-count">{{len .Sites}} site{{if ne (len .Sites) 1}}s{{end}}</span>
-        </div>
-
-        <details class="create-site-panel progressive-panel"{{if not .Sites}} open{{end}}>
-          <summary>
-            <span><strong>Create a site</strong><small>Reserve a permanent public name</small></span>
-            <span class="summary-action"><span class="when-closed">Create</span><span class="when-open">Close</span></span>
-          </summary>
-          <form action="/sites/create" method="post" class="site-create-form">
-            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-            <label>
-              <span class="field-label">Site address</span>
-              <span class="site-name-input"><input name="name" autocomplete="off" maxlength="48" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?" placeholder="my-site" required><span>.{{.SiteDomain}}</span></span>
-              <span class="helper">This name is shared with short links and remains reserved to your account.</span>
-            </label>
-            <label>
-              <span class="field-label">Private title <span class="optional">Optional</span></span>
-              <input name="title" autocomplete="off" maxlength="120" placeholder="My useful little site">
-            </label>
-            <button type="submit" class="button primary compact">Create site</button>
-          </form>
-        </details>
-
-        {{if .Sites}}
-        <ul class="site-list">
-          {{range .Sites}}
-          <li class="site-card">
-            <div class="site-card-header">
-              <div>
-                <div class="link-title-row">
-                  <h3>{{if .Title}}{{.Title}}{{else}}{{.Name}}{{end}}</h3>
-                  <div class="record-badges">
-                    {{if not .Enabled}}<span class="status disabled"><span class="status-dot"></span>Disabled</span>{{else if .HasPublished}}<span class="status enabled"><span class="status-dot"></span>Live</span>{{else if .HasDraft}}<span class="status mode"><span class="status-dot"></span>Draft</span>{{else}}<span class="status disabled"><span class="status-dot"></span>Empty</span>{{end}}
-                    {{if .HasDraft}}<span class="status mode">Unpublished changes</span>{{end}}
-                  </div>
-                </div>
-                {{if .Title}}<span class="slug-label">{{.Name}}</span>{{end}}
-              </div>
-              <div class="link-actions">
-                {{if .HasDraft}}
-                <form action="/sites/preview" method="post">
-                  <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                  <input type="hidden" name="site_name" value="{{.Name}}">
-                  <button type="submit" class="button secondary compact">Preview draft</button>
-                </form>
-                {{end}}
-                {{if .HasPublished}}<a class="button ghost compact" href="{{.URL}}" target="_blank" rel="noreferrer">Visit</a>{{end}}
-              </div>
-            </div>
-            <a class="public-url" href="{{.URL}}" target="_blank" rel="noreferrer">{{.URL}}</a>
-            {{if $.ShowOwners}}<p class="helper site-owner">Owner <strong>{{.OwnerUsername}}</strong></p>{{end}}
-
-            <details class="manage-panel"{{if .Selected}} open{{end}}>
-              <summary><span>Deploy and manage</span><span class="summary-action"><span class="when-closed">Open</span><span class="when-open">Close</span></span></summary>
-              <div class="manage-content">
-                <div class="upload-panel">
-                  <div>
-                    <strong>Upload a new draft</strong>
-                    <p>ZIP an already-built site with <code>index.html</code> at its root. Uploading never changes the live version.</p>
-                  </div>
-                  <form action="/sites/upload" method="post" enctype="multipart/form-data" class="site-upload-form">
-                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                    <input type="hidden" name="site_id" value="{{.ID}}">
-                    <input type="hidden" name="site_name" value="{{.Name}}">
-                    <label>
-                      <span class="sr-only">ZIP bundle</span>
-                      <input name="bundle" type="file" accept=".zip,application/zip" required>
-                    </label>
-                    <button type="submit" class="button secondary compact">Upload draft</button>
-                  </form>
-                  <p class="helper">Maximum 20 MiB upload, 50 MiB expanded, 500 files and 10 MiB per file.</p>
-                </div>
-
-                {{if .Releases}}
-                {{$siteID := .ID}}{{$siteName := .Name}}
-                <div class="release-list" aria-label="Site releases">
-                  <div class="release-list-heading"><strong>Release history</strong><span>Newest first</span></div>
-                  {{range .Releases}}
-                  <div class="release-row">
-                    <div>
-                      <div class="release-title">Version {{.Version}}
-                        {{if .Draft}}<span class="status mode">Draft</span>{{end}}
-                        {{if .Current}}<span class="status enabled">Current</span>{{end}}
-                      </div>
-                      <span class="helper">{{.FileCount}} file{{if ne .FileCount 1}}s{{end}} · {{.TotalSize}} · uploaded {{.CreatedAt}}{{if ne .PublishedAt "Never"}} · first published {{.PublishedAt}}{{end}}</span>
-                    </div>
-                    {{if .Draft}}
-                    <form action="/sites/publish" method="post">
-                      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                      <input type="hidden" name="site_id" value="{{$siteID}}">
-                      <input type="hidden" name="site_name" value="{{$siteName}}">
-                      <input type="hidden" name="release_id" value="{{.ID}}">
-                      <button type="submit" class="button primary compact">Publish publicly</button>
-                    </form>
-                    {{else if not .Current}}
-                    <form action="/sites/publish" method="post">
-                      <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                      <input type="hidden" name="site_id" value="{{$siteID}}">
-                      <input type="hidden" name="site_name" value="{{$siteName}}">
-                      <input type="hidden" name="release_id" value="{{.ID}}">
-                      <button type="submit" class="button ghost compact">Roll back to this</button>
-                    </form>
-                    {{end}}
-                  </div>
-                  {{end}}
-                </div>
-                {{end}}
-
-                <div class="link-settings-row">
-                  <div>
-                    <strong>{{if .Enabled}}Take this site offline{{else}}Bring this site online{{end}}</strong>
-                    <p>The name remains reserved to its original owner either way.</p>
-                  </div>
-                  <form action="/sites/state" method="post">
-                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                    <input type="hidden" name="site_id" value="{{.ID}}">
-                    <input type="hidden" name="site_name" value="{{.Name}}">
-                    {{if .Enabled}}
-                    <input type="hidden" name="enabled" value="false">
-                    <button type="submit" class="button secondary compact">Disable site</button>
-                    {{else}}
-                    <input type="hidden" name="enabled" value="true">
-                    <button type="submit" class="button secondary compact">Enable site</button>
-                    {{end}}
-                  </form>
-                </div>
-              </div>
-            </details>
-          </li>
-          {{end}}
-        </ul>
-        {{else}}
-        <div class="empty-state site-empty-state">
-          <div class="empty-mark" aria-hidden="true">◇</div>
-          <strong>No hosted sites yet</strong>
-          <p>Reserve a name above, then upload a static ZIP bundle as its first private draft.</p>
-        </div>
-        {{end}}
-      </section>
-
-      {{if .Audit}}
-      <details class="audit-panel">
-        <summary><span>Superuser activity</span><span class="summary-action">{{len .Audit}} recent changes</span></summary>
-        <ul class="records compact-records">
-          {{range .Audit}}
-          <li><span><strong>{{.ActorUsername}}</strong> {{.Action}} /{{.Slug}}{{if $.ShowOwners}} for {{.OwnerUsername}}{{end}}</span><span class="subtle">{{.OccurredAt}}</span></li>
-          {{end}}
-        </ul>
       </details>
-      {{end}}
+    </form>
 
-      <footer class="dashboard-footer">
-        <span>Wispdeck</span>
-        <form action="/logout" method="post">
-          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-          <button type="submit" class="text-button">Sign out</button>
-        </form>
-      </footer>
+    <div class="stat-strip">
+      <div><span class="n">{{.LinkCount}}</span> link{{if ne .LinkCount 1}}s{{end}}</div>
+      <div><span class="n">{{.SiteCount}}</span> site{{if ne .SiteCount 1}}s{{end}}</div>
+      <div><span class="n">{{.Hits30}}</span> visits · 30d</div>
+      <label class="filter">
+        <span class="sr-only">Filter</span>
+        <input type="search" placeholder="Filter…" autocomplete="off" data-filter>
+      </label>
     </div>
 
-    <template id="destination-row-template">
-      <div class="destination-row" data-destination-row>
-        <label class="destination-url">
-          <span class="field-label">Destination URL</span>
-          <input name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" placeholder="https://example.com/something-useful" required>
-        </label>
-        <label class="destination-label" data-public-label>
-          <span class="field-label">Public label <span class="optional">Optional</span></span>
-          <input name="target_label" autocomplete="off" maxlength="120" placeholder="Documentation">
-        </label>
-        <button type="button" class="button ghost compact remove-destination" data-remove-destination aria-label="Remove this destination">Remove</button>
+    <div class="chip-row">
+      <button type="button" class="chip" data-chip="all" aria-pressed="true">All · {{.TotalCount}}</button>
+      <button type="button" class="chip" data-chip="link" aria-pressed="false">Links · {{.LinkCount}}</button>
+      <button type="button" class="chip" data-chip="site" aria-pressed="false">Sites · {{.SiteCount}}</button>
+    </div>
+
+    <div class="table-card">
+      <div class="thead" aria-hidden="true">
+        <span>Type</span><span>Address</span><span>Points to / serves</span><span>Trend</span><span>Hits</span><span>Updated</span><span></span>
       </div>
-    </template>
+      {{range .Rows}}
+      <div class="trow" data-row="{{.Kind}}" data-search="{{.Search}}">
+        <span class="badge{{if eq .Kind "site"}} site{{end}}">{{.Badge}}</span>
+        <a class="addr row-link" href="{{.DetailURL}}">{{.Addr}}</a>
+        <span class="dest">{{.Dest}}{{if .Owner}} <span class="row-owner">Owner <strong>{{.Owner}}</strong></span>{{end}}</span>
+        {{if .Trend}}<span class="spark" aria-hidden="true">{{range .Trend}}<span class="sh-{{.H}}{{if .Hot}} hot{{end}}"></span>{{end}}</span>{{else}}<span aria-hidden="true"></span>{{end}}
+        <span class="num">{{.Hits}}</span>
+        <span class="date{{if .Warn}} warn{{end}}">{{.DateLabel}}</span>
+        <button type="button" class="btn quiet compact" data-copy="{{.CopyURL}}">copy</button>
+      </div>
+      {{else}}
+      <div class="table-empty">Nothing here yet. Paste a URL above to create your first short link, or reserve a site.</div>
+      {{end}}
+      <div class="table-empty hidden" data-filter-empty>Nothing matches your filter.</div>
+    </div>
+    <p class="sr-only" aria-live="polite" data-filter-status></p>
+
+    {{if .Audit}}
+    <details class="audit-panel">
+      <summary><span>Superuser activity</span><span class="summary-action">{{len .Audit}} recent changes</span></summary>
+      <ul class="records compact-records">
+        {{range .Audit}}
+        <li><span><strong>{{.ActorUsername}}</strong> {{.Action}} /{{.Slug}}{{if $.ShowOwners}} for {{.OwnerUsername}}{{end}}</span><span class="subtle">{{.OccurredAt}}</span></li>
+        {{end}}
+      </ul>
+    </details>
+    {{end}}
   </main>
+
+  {{template "app_footer" .CSRFToken}}
 </body>
 </html>{{end}}

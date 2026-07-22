@@ -179,18 +179,16 @@ func (s *Service) VerifyCredentials(ctx context.Context, username, password, cli
 		return User{}, fmt.Errorf("verify stored password hash: %w", verifyErr)
 	}
 	if err != nil || !matched || user.Status != UserActive {
-		auditUsername := normalized
-		auditUserID := ""
-		if ValidateUsername(auditUsername) != nil {
-			auditUsername = ""
-		}
+		// Unknown usernames are deliberately not persisted. The public login
+		// endpoint must not give an unauthenticated caller an unbounded database
+		// write primitive. Failures for real accounts remain useful security
+		// events and are covered by the username rate limit and retention policy.
 		if err == nil {
-			auditUserID = user.ID
+			s.recordEvent(ctx, AuthEvent{
+				OccurredAt: s.now().UTC(), Kind: "login_failed", Username: user.Username,
+				UserID: user.ID, ClientIP: clientIP,
+			})
 		}
-		s.recordEvent(ctx, AuthEvent{
-			OccurredAt: s.now().UTC(), Kind: "login_failed", Username: auditUsername,
-			UserID: auditUserID, ClientIP: clientIP,
-		})
 		return User{}, ErrInvalidCredentials
 	}
 

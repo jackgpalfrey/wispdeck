@@ -3,24 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>About the demo bundle</title>
+  <meta name="description" content="How the Wispdeck demo bundle exercises static hosting and Wispist.">
+  <title>About this bundle · Wispdeck demo</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <main class="narrow">
     <nav aria-label="Main navigation">
       <a class="wordmark" href="/">Wispdeck demo</a>
-      <a href="/">Back home</a>
+      <a href="/">Back to the checklist</a>
     </nav>
+
     <section class="hero compact">
-      <p class="eyebrow">Nested route test</p>
-      <h1>This is <code>/about/index.html</code>.</h1>
+      <p class="eyebrow">A deliberately small test site</p>
+      <h1>Static files, shared state.</h1>
       <p class="lede">
-        Reaching this page through <code>/about/</code> confirms that Wispdeck
-        resolves directory indexes and serves assets from the same release.
+        This nested page checks directory-index routing. The homepage also uses
+        Wispist for persistent JSON documents and live updates, without adding
+        a server process for the site.
       </p>
-      <a class="secondary standalone" href="/">Return to the homepage</a>
+      <a class="secondary standalone" href="/">Open the shared checklist</a>
     </section>
   </main>
+
+  <div class="orb orb-one" aria-hidden="true"></div>
+  <div class="orb orb-two" aria-hidden="true"></div>
 </body>
 </html>

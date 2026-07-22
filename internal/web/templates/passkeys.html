@@ -1,137 +1,163 @@
 {{define "passkeys.html"}}<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{template "head_assets"}}
   <title>Authentication — Wispdeck</title>
-  <link rel="stylesheet" href="/assets/admin.css">
   <script src="/assets/webauthn.js" defer></script>
 </head>
 <body>
-  <main class="panel wide">
-    <h1>Authentication</h1>
-    {{if eq .Assurance "bootstrap"}}
-      <p class="notice">Add a passkey or authenticator app to secure this account, or continue with password-only sign-in.</p>
-    {{else if eq .Assurance "password"}}
-      <p class="notice">MFA is not enabled. This account is protected only by its password.</p>
-    {{else if eq .Assurance "recovery"}}
-      <p class="notice">You signed in with a recovery code. Add a replacement passkey before continuing.</p>
-    {{else}}
-      <p class="subtle">Passkeys provide the second factor for {{.Username}}.</p>
-    {{end}}
+  {{if .InApp}}{{template "app_header" .Shell}}{{end}}
 
-    {{if .Passkeys}}
-    <ul class="records">
-      {{range .Passkeys}}
-      <li>
-        <strong>{{.Name}}</strong>
-        <span class="subtle">Added {{.CreatedAt.Format "2006-01-02 15:04 UTC"}}{{if .LastUsedAt}} · last used {{.LastUsedAt.Format "2006-01-02 15:04 UTC"}}{{end}}</span>
-        {{if eq $.Assurance "mfa"}}
-        <form action="/security/passkeys/delete" method="post">
-          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-          <input type="hidden" name="name" value="{{.Name}}">
-          <button type="submit" class="danger">Delete {{.Name}}</button>
-        </form>
-        {{end}}
-      </li>
+  <main class="page w-mid settings-stack">
+    {{if .InApp}}<a class="backlink" href="/settings">← Settings</a>{{end}}
+    <div class="page-intro">
+      <h1>Authentication</h1>
+      {{if eq .Assurance "bootstrap"}}
+        <p>Add a passkey or authenticator app to secure this account, or continue with password-only sign-in.</p>
+      {{else if eq .Assurance "password"}}
+        <p>MFA is not enabled. This account is protected only by its password.</p>
+      {{else if eq .Assurance "recovery"}}
+        <p>You signed in with a recovery code. Add a replacement passkey before continuing.</p>
+      {{else}}
+        <p>Passkeys provide the second factor for {{.Username}}.</p>
       {{end}}
-    </ul>
-    {{end}}
+    </div>
 
-    <section data-passkey-register data-csrf-token="{{.CSRFToken}}">
-      <h2>Add a passkey</h2>
-      <label for="passkey-name">Name</label>
-      <input id="passkey-name" name="name" maxlength="80" placeholder="Laptop, phone, security key" required>
-      <p id="passkey-status" class="error hidden" role="alert"></p>
-      <button type="button" data-register-button>Add passkey</button>
-    </section>
+    <div class="panel-card on-card">
+      <div class="card-title">Passkeys</div>
+      {{if .Passkeys}}
+      <ul class="records">
+        {{range .Passkeys}}
+        <li>
+          <div class="record-line"><strong>{{.Name}}</strong>
+          <span class="subtle">Added {{.CreatedAt.Format "2006-01-02 15:04 UTC"}}{{if .LastUsedAt}} · last used {{.LastUsedAt.Format "2006-01-02 15:04 UTC"}}{{end}}</span></div>
+          {{if eq $.Assurance "mfa"}}
+          <form action="/security/passkeys/delete" method="post">
+            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+            <input type="hidden" name="name" value="{{.Name}}">
+            <button type="submit" class="btn danger compact">Delete {{.Name}}</button>
+          </form>
+          {{end}}
+        </li>
+        {{end}}
+      </ul>
+      {{end}}
+      <section data-passkey-register data-csrf-token="{{.CSRFToken}}" class="form-stack">
+        <label class="field">Add a passkey
+          <input id="passkey-name" name="name" maxlength="80" placeholder="Laptop, phone, security key" required>
+        </label>
+        <p id="passkey-status" class="error hidden" role="alert"></p>
+        <div class="save-row"><button type="button" class="btn compact" data-register-button>Add passkey</button></div>
+      </section>
+    </div>
 
-    <section>
-      <h2>Authenticator app</h2>
-      {{if .TOTPConfigured}}
-        <p class="subtle">An RFC 6238 authenticator app is configured.</p>
+    <div class="panel-card">
+      <div class="toggle-row">
+        <div>
+          <div class="card-title">Authenticator app</div>
+          {{if .TOTPConfigured}}
+          <p class="card-sub">An RFC 6238 authenticator app is configured.</p>
+          {{else}}
+          <p class="card-sub">Use any standards-compatible app to generate six-digit sign-in codes.</p>
+          {{end}}
+        </div>
+        {{if .TOTPConfigured}}
         {{if eq .Assurance "mfa"}}
         <form action="/security/totp/delete" method="post">
           <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-          <button type="submit" class="danger">Remove authenticator app</button>
+          <button type="submit" class="btn danger compact">Remove authenticator app</button>
         </form>
         {{end}}
-      {{else}}
-        <p class="subtle">Use any standards-compatible app to generate six-digit sign-in codes.</p>
+        {{else}}
         <form action="/security/totp/setup" method="post">
           <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-          <button type="submit">Set up authenticator app</button>
+          <button type="submit" class="btn quiet compact">Set up authenticator app</button>
         </form>
+        {{end}}
+      </div>
+      {{if eq .Assurance "mfa"}}
+      <div class="toggle-row">
+        <div>
+          <div class="card-title">Recovery codes</div>
+          <p class="card-sub">Rotating codes immediately invalidates every previous unused code.</p>
+        </div>
+        <form action="/security/recovery-codes/rotate" method="post">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="btn quiet compact">Generate new recovery codes</button>
+        </form>
+      </div>
       {{end}}
+      {{if ne .Assurance "recovery"}}
+      <div class="toggle-row">
+        <div>
+          <div class="card-title">Password</div>
+          <p class="card-sub">Changing your password signs out every device.</p>
+        </div>
+        <a class="btn quiet compact" href="/security/password">Change password</a>
+      </div>
+      {{end}}
+    </div>
+
+    <section id="recovery-codes" class="panel-card hidden" aria-live="polite">
+      <div class="card-title">Save these recovery codes</div>
+      <p class="card-sub">Each code works once. Store them somewhere separate from this device; they will not be shown again.</p>
+      <ol id="recovery-code-list" class="codes"></ol>
+      <div class="save-row"><button type="button" class="btn quiet compact" data-copy-codes>Copy codes</button></div>
     </section>
 
-    {{if eq .Assurance "mfa"}}
-    <section>
-      <h2>Recovery codes</h2>
-      <p class="subtle">Rotating codes immediately invalidates every previous unused code.</p>
-      <form action="/security/recovery-codes/rotate" method="post">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <button type="submit" class="secondary">Generate new recovery codes</button>
-      </form>
-    </section>
-    {{end}}
-
-    <section>
-      <h2>Sessions</h2>
+    <div class="panel-card">
+      <div class="card-title">Sessions</div>
       <ul class="records">
         {{range .Sessions}}
         <li>
-          <strong>{{.Assurance}}{{if eq .TokenHash $.CurrentSession}} · current{{end}}</strong>
-          <span class="subtle">{{.ClientIP}} · {{.UserAgent}} · last active {{.LastSeen.Format "2006-01-02 15:04 UTC"}}</span>
+          <div class="record-line"><strong>{{.Assurance}}{{if eq .TokenHash $.CurrentSession}} · current{{end}}</strong>
+          <span class="subtle">{{.ClientIP}} · {{.UserAgent}} · last active {{.LastSeen.Format "2006-01-02 15:04 UTC"}}</span></div>
           <form action="/security/sessions/revoke" method="post">
             <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
             <input type="hidden" name="session" value="{{printf "%x" .TokenHash}}">
-            <button type="submit" class="danger">{{if eq .TokenHash $.CurrentSession}}Sign out this session{{else}}Revoke session{{end}}</button>
+            <button type="submit" class="btn danger compact">{{if eq .TokenHash $.CurrentSession}}Sign out this session{{else}}Revoke session{{end}}</button>
           </form>
         </li>
         {{end}}
       </ul>
       <form action="/security/sessions/revoke-others" method="post">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <button type="submit" class="secondary">Sign out other sessions</button>
+        <button type="submit" class="btn quiet compact">Sign out other sessions</button>
       </form>
-    </section>
+    </div>
 
-    {{if ne .Assurance "recovery"}}
-    <p><a href="/security/password">Change password</a></p>
-    {{end}}
-
-    <section>
-      <h2>Recent authentication activity</h2>
-      <ul class="records">
+    <div class="panel-card">
+      <div class="card-title">Recent authentication activity</div>
+      <ul class="records compact-records">
         {{range .Events}}
-        <li><strong>{{.Kind}}</strong><span class="subtle">{{.OccurredAt.Format "2006-01-02 15:04 UTC"}} · {{.ClientIP}}{{if .Details}} · {{.Details}}{{end}}</span></li>
+        <li><span><strong>{{.Kind}}</strong> · {{.ClientIP}}{{if .Details}} · {{.Details}}{{end}}</span><span class="subtle">{{.OccurredAt.Format "2006-01-02 15:04 UTC"}}</span></li>
         {{else}}<li class="subtle">No events recorded yet.</li>{{end}}
       </ul>
-    </section>
+    </div>
 
-    <section id="recovery-codes" class="hidden" aria-live="polite">
-      <h2>Save these recovery codes</h2>
-      <p>Each code works once. Store them somewhere separate from this device; they will not be shown again.</p>
-      <ol id="recovery-code-list" class="codes"></ol>
-      <button type="button" class="secondary" data-copy-codes>Copy codes</button>
-    </section>
-
-    {{if or (eq .Assurance "mfa") (eq .Assurance "password")}}<p><a href="/">Return to Wispdeck</a></p>{{end}}
     {{if eq .Assurance "bootstrap"}}
-    <section>
-      <h2>Continue without MFA</h2>
-      <p class="subtle">Your password will be the only protection on this account. You can enable MFA later from Authentication.</p>
-      <form action="/security/mfa/skip" method="post">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <button type="submit" class="secondary">Skip MFA for now</button>
-      </form>
-    </section>
+    <div class="panel-card">
+      <div class="toggle-row">
+        <div>
+          <div class="card-title">Continue without MFA</div>
+          <p class="card-sub">Your password will be the only protection on this account. You can enable MFA later.</p>
+        </div>
+        <form action="/security/mfa/skip" method="post">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="btn quiet compact">Skip MFA for now</button>
+        </form>
+      </div>
+    </div>
     {{end}}
+
+    {{if not .InApp}}
     <form action="/logout" method="post">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <button type="submit" class="secondary">Sign out</button>
+      <button type="submit" class="btn quiet compact">Sign out</button>
     </form>
+    {{end}}
   </main>
+
+  {{if .InApp}}{{template "app_footer" .CSRFToken}}{{end}}
 </body>
 </html>{{end}}

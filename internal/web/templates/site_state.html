@@ -6,19 +6,43 @@
   <meta name="robots" content="noindex,nofollow">
   <title>{{if .Draft}}Draft site{{else}}Site reserved{{end}} — Wispdeck</title>
   <style>
-    :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
-    body { display:grid; min-height:100vh; margin:0; padding:1.5rem; box-sizing:border-box; place-items:center; background:#101116; color:#f4f5f8; }
-    main { width:min(28rem,100%); padding:2rem; box-sizing:border-box; border:1px solid #30323d; border-radius:1rem; background:#191a21; box-shadow:0 20px 60px #0006; }
-    .mark { display:grid; width:2.3rem; height:2.3rem; place-items:center; border-radius:.7rem; background:#8f80f6; color:#11121a; font-weight:850; }
-    h1 { margin:1.3rem 0 .6rem; font-size:1.7rem; letter-spacing:-.03em; }
-    p { color:#a7aab8; }
-    a { display:flex; justify-content:center; margin-top:1.4rem; padding:.8rem 1rem; border-radius:.6rem; background:#8f80f6; color:#11121a; font-weight:750; text-decoration:none; }
-    small { display:block; margin-top:1rem; color:#7f8290; }
+    :root {
+      color-scheme: light dark;
+      --bg: #faf9f6; --card: #ffffff; --line: #e6e3da; --ink: #1c1b18;
+      --mut: #6d685c; --fnt: #a29b8a; --acc: #3f6b4f; --acc-text: #ffffff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1a1915; --card: #22211b; --line: #32302a; --ink: #e9e6dc;
+        --mut: #a8a294; --fnt: #6f6a5c; --acc: #8aa894; --acc-text: #1a1915;
+      }
+    }
+    body {
+      display: grid; min-height: 100vh; margin: 0; padding: 1.5rem; box-sizing: border-box;
+      place-items: center; background: var(--bg); color: var(--ink);
+      font: 14px/1.5 system-ui, sans-serif;
+    }
+    main {
+      width: min(26rem, 100%); padding: 1.8rem 1.6rem; box-sizing: border-box;
+      border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+    }
+    .mark {
+      display: grid; width: 2rem; height: 2rem; place-items: center; border-radius: 6px;
+      background: var(--ink); color: var(--bg); font-weight: 700; font-family: ui-monospace, monospace;
+    }
+    h1 { margin: 1.1rem 0 0.5rem; font-size: 1.25rem; letter-spacing: -0.01em; }
+    p { margin: 0; color: var(--mut); font-size: 0.85rem; }
+    a {
+      display: flex; justify-content: center; margin-top: 1.3rem; padding: 0.7rem 1rem;
+      border-radius: 6px; background: var(--acc); color: var(--acc-text);
+      font-weight: 600; text-decoration: none; font-size: 0.9rem;
+    }
+    small { display: block; margin-top: 0.9rem; color: var(--fnt); font-size: 0.75rem; }
   </style>
 </head>
 <body>
   <main>
-    <div class="mark" aria-hidden="true">W</div>
+    <div class="mark" aria-hidden="true">w</div>
     {{if .Draft}}
       <h1>This site is currently a draft</h1>
       <p><strong>{{.Name}}</strong> has not been published yet. Its owner can sign in to preview the draft.</p>

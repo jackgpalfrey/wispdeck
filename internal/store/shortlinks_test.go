@@ -34,7 +34,7 @@ func TestSQLiteShortLinkLifecycleAuthorizationStatsAndAudit(t *testing.T) {
 		Slug: "release-notes", Title: "Private title", Description: "Private notes",
 		Mode: shortlink.ModeRedirect, ExpiresAt: now.Add(24 * time.Hour),
 		Destinations: []shortlink.Destination{{Label: "Release", URL: "https://example.com/v1"}},
-	}, now)
+	}, shortlink.DefaultLimits(), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestSQLiteShortLinkLifecycleAuthorizationStatsAndAudit(t *testing.T) {
 	if _, err := database.CreateShortLink(ctx, bob.ID, shortlink.Link{
 		Slug: "release-notes", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.net"}},
-	}, now); !errors.Is(err, shortlink.ErrSlugUnavailable) {
+	}, shortlink.DefaultLimits(), now); !errors.Is(err, shortlink.ErrSlugUnavailable) {
 		t.Fatalf("duplicate slug error = %v", err)
 	}
 
@@ -126,7 +126,7 @@ func TestSQLiteShortLinkLifecycleAuthorizationStatsAndAudit(t *testing.T) {
 	if _, err := database.CreateShortLink(ctx, alice.ID, shortlink.Link{
 		Slug: "release-notes", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://replacement.example"}},
-	}, now.Add(8*time.Minute)); !errors.Is(err, shortlink.ErrSlugUnavailable) {
+	}, shortlink.DefaultLimits(), now.Add(8*time.Minute)); !errors.Is(err, shortlink.ErrSlugUnavailable) {
 		t.Fatalf("retired slug reuse error = %v", err)
 	}
 
@@ -159,8 +159,45 @@ func TestSQLiteShortLinkRequiresActiveOwner(t *testing.T) {
 	if _, err := database.CreateShortLink(ctx, user.ID, shortlink.Link{
 		Slug: "blocked", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, now); !errors.Is(err, shortlink.ErrForbidden) {
+	}, shortlink.DefaultLimits(), now); !errors.Is(err, shortlink.ErrForbidden) {
 		t.Fatalf("disabled-owner creation error = %v", err)
+	}
+}
+
+func TestShortLinkQuotaIncludesPermanentlyReservedRetiredLinks(t *testing.T) {
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "wispdeck.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	user, err := database.CreateUser(ctx, "owner", "hash", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := shortlink.Limits{MaxLinksPerUser: 1}
+	first, err := database.CreateShortLink(ctx, user.ID, shortlink.Link{
+		Slug: "first", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
+	}, limits, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreateShortLink(ctx, user.ID, shortlink.Link{
+		Slug: "second", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
+	}, limits, now); !errors.Is(err, shortlink.ErrLinkLimit) {
+		t.Fatalf("link quota error = %v", err)
+	}
+	if err := database.RetireShortLink(ctx, first.ID, user.ID, false, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreateShortLink(ctx, user.ID, shortlink.Link{
+		Slug: "second", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
+	}, limits, now.Add(2*time.Minute)); !errors.Is(err, shortlink.ErrLinkLimit) {
+		t.Fatalf("retired permanent name did not consume quota: %v", err)
 	}
 }
 

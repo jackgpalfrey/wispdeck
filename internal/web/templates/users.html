@@ -1,95 +1,114 @@
 {{define "users.html"}}<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{template "head_assets"}}
   <title>Users — Wispdeck</title>
-  <link rel="stylesheet" href="/assets/admin.css">
 </head>
 <body>
-  <main class="panel wide">
-    <h1>Users</h1>
-    <p class="subtle">Superusers can manage every Wispdeck user. MFA is not required for these actions.</p>
+  {{template "app_header" .Shell}}
 
-    <section>
-      <h2>Create with a setup link</h2>
-      <p class="subtle">The link works once and expires after {{.SetupHours}} hours.</p>
+  <main class="page w-mid settings-stack">
+    <a class="backlink" href="/settings">← Settings</a>
+    <div class="page-intro">
+      <h1>Users</h1>
+      <p>Superusers can manage every Wispdeck user. MFA is not required for these actions.</p>
+    </div>
+
+    <div class="panel-card on-card form-stack">
+      <div>
+        <div class="card-title">Create with a setup link</div>
+        <p class="card-sub">The link works once and expires after {{.SetupHours}} hours.</p>
+      </div>
       <form action="/settings/users/create-setup" method="post">
+        <div class="advanced-grid">
+          <label class="field">Username
+            <input id="setup-username" name="username" autocomplete="off" maxlength="64" required>
+          </label>
+          <label class="field">Role
+            <select id="setup-role" name="role">
+              <option value="user">User</option>
+              <option value="superuser">Superuser</option>
+            </select>
+          </label>
+        </div>
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <label for="setup-username">Username</label>
-        <input id="setup-username" name="username" autocomplete="off" maxlength="64" required>
-        <label for="setup-role">Role</label>
-        <select id="setup-role" name="role">
-          <option value="user">User</option>
-          <option value="superuser">Superuser</option>
-        </select>
-        <button type="submit">Create user and setup link</button>
+        <div class="save-row"><button type="submit" class="btn compact">Create user and setup link</button></div>
       </form>
-    </section>
 
-    <details>
-      <summary>Create with a permanent password</summary>
-      <form action="/settings/users/create-password" method="post">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <label for="password-username">Username</label>
-        <input id="password-username" name="username" autocomplete="off" maxlength="64" required>
-        <label for="password-role">Role</label>
-        <select id="password-role" name="role">
-          <option value="user">User</option>
-          <option value="superuser">Superuser</option>
-        </select>
-        <label for="assigned-password">Permanent password</label>
-        <input id="assigned-password" name="password" type="password" autocomplete="new-password" minlength="15" maxlength="1024" required>
-        <label for="assigned-password-confirmation">Confirm password</label>
-        <input id="assigned-password-confirmation" name="confirm_password" type="password" autocomplete="new-password" minlength="15" maxlength="1024" required>
-        <button type="submit">Create user with password</button>
-      </form>
-    </details>
+      <details class="progressive-panel">
+        <summary><span><strong>Create with a permanent password</strong> <small>Hand the password over yourself</small></span><span class="summary-action"><span class="when-closed">Show</span><span class="when-open">Hide</span></span></summary>
+        <div class="progressive-content">
+          <form action="/settings/users/create-password" method="post">
+            <div class="advanced-grid">
+              <label class="field">Username
+                <input id="password-username" name="username" autocomplete="off" maxlength="64" required>
+              </label>
+              <label class="field">Role
+                <select id="password-role" name="role">
+                  <option value="user">User</option>
+                  <option value="superuser">Superuser</option>
+                </select>
+              </label>
+              <label class="field">Permanent password
+                <input id="assigned-password" name="password" type="password" autocomplete="new-password" minlength="15" maxlength="1024" required>
+              </label>
+              <label class="field">Confirm password
+                <input id="assigned-password-confirmation" name="confirm_password" type="password" autocomplete="new-password" minlength="15" maxlength="1024" required>
+              </label>
+            </div>
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <div class="save-row"><button type="submit" class="btn compact">Create user with password</button></div>
+          </form>
+        </div>
+      </details>
+    </div>
 
-    <section>
-      <h2>Existing users</h2>
+    <div class="panel-card">
+      <div class="card-title">Existing users</div>
       <ul class="records">
         {{range .Users}}
         <li>
-          <strong>{{.Username}}{{if eq .ID $.CurrentID}} · you{{end}}</strong>
-          <span class="subtle">{{.Role}} · {{.Status}} · {{.SessionCount}} active sessions{{if .MFASkipped}} · password only{{end}}</span>
+          <div class="record-line">
+            <strong>{{.Username}}{{if eq .ID $.CurrentID}} · you{{end}}</strong>
+            <span class="subtle">{{.Role}} · {{.Status}} · {{.SessionCount}} active session{{if ne .SessionCount 1}}s{{end}}{{if .MFASkipped}} · password only{{end}}</span>
+          </div>
           <form action="/settings/users/role" method="post">
             <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
             <input type="hidden" name="user_id" value="{{.ID}}">
-            <label for="role-{{.ID}}">Role</label>
+            <label class="sr-only" for="role-{{.ID}}">Role</label>
             <select id="role-{{.ID}}" name="role">
               <option value="user"{{if eq .Role "user"}} selected{{end}}>User</option>
               <option value="superuser"{{if eq .Role "superuser"}} selected{{end}}>Superuser</option>
             </select>
-            <button type="submit" class="secondary">Update role</button>
+            <button type="submit" class="btn quiet compact">Update role</button>
           </form>
           {{if eq .Status "active"}}
           <form action="/settings/users/status" method="post">
             <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
             <input type="hidden" name="user_id" value="{{.ID}}">
             <input type="hidden" name="status" value="disabled">
-            <button type="submit" class="danger">Disable user</button>
+            <button type="submit" class="btn danger compact">Disable user</button>
           </form>
           {{else if eq .Status "disabled"}}
           <form action="/settings/users/status" method="post">
             <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
             <input type="hidden" name="user_id" value="{{.ID}}">
             <input type="hidden" name="status" value="active">
-            <button type="submit" class="secondary">Enable user</button>
+            <button type="submit" class="btn quiet compact">Enable user</button>
           </form>
           {{else if eq .Status "pending"}}
           <form action="/settings/users/setup-link" method="post">
             <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
             <input type="hidden" name="user_id" value="{{.ID}}">
-            <button type="submit" class="secondary">Replace setup link</button>
+            <button type="submit" class="btn quiet compact">Replace setup link</button>
           </form>
           {{end}}
         </li>
         {{end}}
       </ul>
-    </section>
-
-    <p><a href="/">Return to Wispdeck</a></p>
+    </div>
   </main>
+
+  {{template "app_footer" .CSRFToken}}
 </body>
 </html>{{end}}

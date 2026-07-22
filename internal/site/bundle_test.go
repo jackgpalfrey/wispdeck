@@ -45,6 +45,7 @@ func TestReadZIPRejectsUnsafeAndAmbiguousArchives(t *testing.T) {
 		{name: "traversal", files: map[string]string{"index.html": "x", "../secret": "x"}, err: ErrInvalidFile},
 		{name: "backslash", files: map[string]string{"index.html": "x", `assets\app.js`: "x"}, err: ErrInvalidFile},
 		{name: "reserved", files: map[string]string{"index.html": "x", "_wispdeck/data": "x"}, err: ErrInvalidFile},
+		{name: "wispist reserved", files: map[string]string{"index.html": "x", "_wispist/v1": "x"}, err: ErrInvalidFile},
 		{name: "case collision", files: map[string]string{"index.html": "x", "A.js": "x", "a.js": "y"}, err: ErrInvalidFile},
 	}
 	for _, test := range tests {

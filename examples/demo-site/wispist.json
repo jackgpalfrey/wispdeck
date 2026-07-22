@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "collections": {
+    "before-you-go": {
+      "access": "shared",
+      "limits": {
+        "maxDocuments": 250,
+        "maxDocumentBytes": 4096
+      }
+    }
+  }
+}

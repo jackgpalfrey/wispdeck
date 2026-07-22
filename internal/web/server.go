@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"html/template"
 	"image/png"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -24,6 +25,8 @@ import (
 	"github.com/wispdeck/wispdeck/internal/limit"
 	"github.com/wispdeck/wispdeck/internal/shortlink"
 	hostedsite "github.com/wispdeck/wispdeck/internal/site"
+	"github.com/wispdeck/wispdeck/internal/updater"
+	"github.com/wispdeck/wispdeck/wispist"
 )
 
 const productionCookieName = "__Host-wispdeck_session"
@@ -54,6 +57,8 @@ type Server struct {
 	totp                     *auth.TOTPService
 	links                    *shortlink.Service
 	sites                    *hostedsite.Service
+	wispist                  *wispist.Engine
+	updates                  *updater.Manager
 	passwordChecker          auth.PasswordChecker
 	limiter                  *limit.LoginLimiter
 	templates                *template.Template
@@ -80,20 +85,19 @@ func New(
 	totpService *auth.TOTPService,
 	shortLinkService *shortlink.Service,
 	siteService *hostedsite.Service,
+	wispistEngine *wispist.Engine,
+	updateManager *updater.Manager,
 ) (*Server, error) {
-	if config.SiteDomain == "" && config.AppOrigin != nil {
-		config.SiteDomain = config.AppOrigin.Hostname()
-	}
-	config.SiteDomain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(config.SiteDomain), "."))
-	if config.PreviewDomain == "" && config.SiteDomain != "" {
-		config.PreviewDomain = "preview." + config.SiteDomain
-	}
-	config.PreviewDomain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(config.PreviewDomain), "."))
-	if err := validateConfig(config); err != nil {
+	siteDomain, previewDomain, err := ResolveOriginConfiguration(
+		config.AppOrigin, config.SiteDomain, config.PreviewDomain, config.Development,
+	)
+	if err != nil {
 		return nil, err
 	}
-	if authService == nil || passkeyService == nil || totpService == nil || shortLinkService == nil || siteService == nil {
-		return nil, errors.New("authentication, passkey, TOTP, short-link, and site services are required")
+	config.SiteDomain = siteDomain
+	config.PreviewDomain = previewDomain
+	if authService == nil || passkeyService == nil || totpService == nil || shortLinkService == nil || siteService == nil || wispistEngine == nil {
+		return nil, errors.New("authentication, passkey, TOTP, short-link, site, and Wispist services are required")
 	}
 	if config.PasswordChecker == nil {
 		return nil, errors.New("password checker is required")
@@ -116,6 +120,8 @@ func New(
 		totp:                     totpService,
 		links:                    shortLinkService,
 		sites:                    siteService,
+		wispist:                  wispistEngine,
+		updates:                  updateManager,
 		passwordChecker:          config.PasswordChecker,
 		limiter:                  limit.NewLoginLimiter(),
 		templates:                templates,
@@ -144,23 +150,43 @@ func New(
 func (s *Server) Handler() http.Handler { return s.handler }
 
 func validateConfig(config Config) error {
-	if config.AppOrigin == nil {
-		return errors.New("application origin is required")
+	_, _, err := ResolveOriginConfiguration(
+		config.AppOrigin, config.SiteDomain, config.PreviewDomain, config.Development,
+	)
+	return err
+}
+
+// ResolveOriginConfiguration applies Wispdeck's domain defaults and validates
+// the application/content origin boundary without constructing a server.
+func ResolveOriginConfiguration(
+	u *url.URL,
+	siteDomain, previewDomain string,
+	development bool,
+) (string, string, error) {
+	if u == nil {
+		return "", "", errors.New("application origin is required")
 	}
-	u := config.AppOrigin
 	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return errors.New("application origin must contain only a scheme and host")
+		return "", "", errors.New("application origin must contain only a scheme and host")
 	}
-	if u.Scheme != "https" && !(config.Development && u.Scheme == "http") {
-		return errors.New("application origin must use HTTPS outside development mode")
+	if u.Scheme != "https" && !(development && u.Scheme == "http") {
+		return "", "", errors.New("application origin must use HTTPS outside development mode")
 	}
-	if !validSiteDomain(config.SiteDomain) {
-		return errors.New("site domain must be a valid DNS hostname without a scheme, wildcard, or port")
+	if siteDomain == "" {
+		siteDomain = u.Hostname()
 	}
-	if !validSiteDomain(config.PreviewDomain) || config.PreviewDomain == config.SiteDomain {
-		return errors.New("preview domain must be a distinct valid DNS hostname without a scheme, wildcard, or port")
+	siteDomain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(siteDomain), "."))
+	if previewDomain == "" && siteDomain != "" {
+		previewDomain = "preview." + siteDomain
 	}
-	return nil
+	previewDomain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(previewDomain), "."))
+	if !validSiteDomain(siteDomain) {
+		return "", "", errors.New("site domain must be a valid DNS hostname without a scheme, wildcard, or port")
+	}
+	if !validSiteDomain(previewDomain) || previewDomain == siteDomain {
+		return "", "", errors.New("preview domain must be a distinct valid DNS hostname without a scheme, wildcard, or port")
+	}
+	return siteDomain, previewDomain, nil
 }
 
 func validSiteDomain(value string) bool {
@@ -192,8 +218,20 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /login/totp", s.totpLogin)
 	mux.HandleFunc("POST /api/auth/passkey/login/begin", s.beginPasskeyLogin)
 	mux.HandleFunc("POST /api/auth/passkey/login/finish", s.finishPasskeyLogin)
-	mux.Handle("GET /{$}", s.requireSession(http.HandlerFunc(s.dashboard)))
+	mux.HandleFunc("GET /{$}", s.home)
 	mux.Handle("POST /logout", s.requireSession(http.HandlerFunc(s.logout)))
+	mux.Handle("GET /links/{id}", s.requireSession(http.HandlerFunc(s.linkDetailPage)))
+	mux.Handle("GET /sites/new", s.requireSession(http.HandlerFunc(s.newSitePage)))
+	mux.Handle("GET /sites/{name}", s.requireSession(http.HandlerFunc(s.siteDetailPage)))
+	mux.Handle("GET /sites/{name}/data", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.siteDataPage))))
+	mux.Handle("GET /sites/{name}/data/export", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.exportSiteData))))
+	mux.Handle("GET /settings", s.requireSession(http.HandlerFunc(s.settingsPage)))
+	mux.Handle("GET /settings/updates", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.updatesPage))))
+	mux.Handle("POST /settings/updates/mode", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.changeUpdateMode))))
+	mux.Handle("POST /settings/updates/check", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.checkForUpdates))))
+	mux.Handle("POST /settings/updates/apply", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.applyUpdate))))
+	mux.Handle("POST /settings/updates/skip", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.skipUpdate))))
+	mux.Handle("POST /settings/updates/unskip", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.unskipUpdate))))
 	mux.Handle("POST /links/create", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.createShortLink))))
 	mux.Handle("POST /links/update", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.updateShortLink))))
 	mux.Handle("POST /links/state", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.setShortLinkState))))
@@ -203,6 +241,11 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /sites/publish", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.publishSite))))
 	mux.Handle("POST /sites/state", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.setSiteState))))
 	mux.Handle("POST /sites/preview", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.previewSite))))
+	mux.Handle("POST /sites/{name}/data/update", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.updateSiteDataDocument))))
+	mux.Handle("POST /sites/{name}/data/delete", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.deleteSiteDataDocument))))
+	mux.Handle("POST /sites/{name}/data/clear", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.clearSiteDataCollection))))
+	mux.Handle("POST /sites/{name}/releases/delete", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.deleteSiteRelease))))
+	mux.Handle("POST /sites/{name}/purge", s.requireSession(s.requireManagedSession(http.HandlerFunc(s.purgeSite))))
 	mux.HandleFunc("GET /sites/{name}/preview-entry", s.previewSiteEntry)
 	mux.Handle("GET /security/passkeys", s.requireSession(http.HandlerFunc(s.passkeySettings)))
 	mux.Handle("POST /security/mfa/skip", s.requireSession(http.HandlerFunc(s.skipMFA)))
@@ -226,7 +269,44 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("POST /settings/users/setup-link", s.requireSession(s.requireSuperuser(http.HandlerFunc(s.replaceUserSetupLink))))
 	mux.HandleFunc("GET /{slug}", s.resolvePublicName)
 	mux.HandleFunc("GET /{slug}/{rest...}", s.redirectSiteAlias)
-	return s.hostBoundary(s.securityBoundary(mux))
+	return s.operationalBoundary(s.hostBoundary(s.securityBoundary(mux)))
+}
+
+// operationalBoundary exposes only non-sensitive process state. Direct
+// loopback access lets an updater verify the new binary without depending on
+// public DNS or TLS; hosted-site origins retain complete ownership of their
+// own /healthz paths.
+func (s *Server) operationalBoundary(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" ||
+			(!equalHost(r.Host, s.config.AppOrigin.Host) && !loopbackHost(r.Host)) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok\n")
+	})
+}
+
+func loopbackHost(value string) bool {
+	host := value
+	if parsed, _, err := net.SplitHostPort(value); err == nil {
+		host = parsed
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) assets() http.Handler {
@@ -240,7 +320,7 @@ func (s *Server) assets() http.Handler {
 func (s *Server) securityBoundary(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
@@ -355,11 +435,6 @@ type shortLinkForm struct {
 	Error        string
 }
 
-type dailyStatView struct {
-	Day    string
-	Visits int64
-}
-
 type shortLinkView struct {
 	ID            string
 	OwnerUsername string
@@ -377,7 +452,6 @@ type shortLinkView struct {
 	ExpiresAt     string
 	ExpiresInput  string
 	LastVisitedAt string
-	DailyStats    []dailyStatView
 }
 
 type auditEventView struct {
@@ -388,119 +462,33 @@ type auditEventView struct {
 	Action        string
 }
 
-type dashboardView struct {
-	Username     string
-	CSRFToken    string
-	Assurance    auth.Assurance
-	Role         auth.Role
-	ShowOwners   bool
-	ShortBaseURL string
-	SiteDomain   string
-	CreatedURL   string
-	CreatedSite  string
-	Create       shortLinkForm
-	Links        []shortLinkView
-	Sites        []siteView
-	Audit        []auditEventView
-}
-
-func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status int, form shortLinkForm) {
-	session := sessionFromContext(r.Context())
-	actor := shortLinkActor(session)
-	links, err := s.links.List(r.Context(), actor)
-	if err != nil {
-		s.config.Logger.ErrorContext(r.Context(), "list short links", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+func (s *Server) shortLinkView(link shortlink.Link, now time.Time) shortLinkView {
+	lastVisited := "Never"
+	if !link.LastVisitedAt.IsZero() {
+		lastVisited = link.LastVisitedAt.Format("2006-01-02 15:04 UTC")
 	}
-	auditEvents, err := s.links.AuditEvents(r.Context(), actor, 25)
-	if err != nil {
-		s.config.Logger.ErrorContext(r.Context(), "list short-link audit events", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+	expiresAt := "Never"
+	expiresInput := ""
+	expired := false
+	if !link.ExpiresAt.IsZero() {
+		expiresAt = link.ExpiresAt.Format("2006-01-02 15:04 UTC")
+		expiresInput = link.ExpiresAt.Format("2006-01-02T15:04")
+		expired = !link.ExpiresAt.After(now)
 	}
-	hostedSites, err := s.sites.List(r.Context(), siteActor(session))
-	if err != nil {
-		s.config.Logger.ErrorContext(r.Context(), "list hosted sites", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+	view := shortLinkView{
+		ID: link.ID, OwnerUsername: link.OwnerUsername, Slug: link.Slug,
+		Title: link.Title, Description: link.Description, Mode: link.Mode,
+		ModeLabel: shortLinkModeLabel(link.Mode), PublicURL: s.shortLinkURL(link.Slug),
+		Enabled: link.Enabled, Expired: expired, VisitCount: link.VisitCount,
+		CreatedAt: link.CreatedAt.Format("2006-01-02 15:04 UTC"),
+		ExpiresAt: expiresAt, ExpiresInput: expiresInput, LastVisitedAt: lastVisited,
 	}
-	now := time.Now().UTC()
-	views := make([]shortLinkView, 0, len(links))
-	for _, link := range links {
-		lastVisited := "Never"
-		if !link.LastVisitedAt.IsZero() {
-			lastVisited = link.LastVisitedAt.Format("2006-01-02 15:04 UTC")
-		}
-		expiresAt := "Never"
-		expiresInput := ""
-		expired := false
-		if !link.ExpiresAt.IsZero() {
-			expiresAt = link.ExpiresAt.Format("2006-01-02 15:04 UTC")
-			expiresInput = link.ExpiresAt.Format("2006-01-02T15:04")
-			expired = !link.ExpiresAt.After(now)
-		}
-		view := shortLinkView{
-			ID: link.ID, OwnerUsername: link.OwnerUsername, Slug: link.Slug,
-			Title: link.Title, Description: link.Description, Mode: link.Mode,
-			ModeLabel: shortLinkModeLabel(link.Mode), PublicURL: s.shortLinkURL(link.Slug),
-			Enabled: link.Enabled, Expired: expired, VisitCount: link.VisitCount,
-			CreatedAt: link.CreatedAt.Format("2006-01-02 15:04 UTC"),
-			ExpiresAt: expiresAt, ExpiresInput: expiresInput, LastVisitedAt: lastVisited,
-		}
-		for _, destination := range link.Destinations {
-			view.Destinations = append(view.Destinations, shortLinkDestinationForm{
-				Label: destination.Label, URL: destination.URL,
-			})
-		}
-		for _, stat := range link.DailyStats {
-			view.DailyStats = append(view.DailyStats, dailyStatView{
-				Day: stat.Day.Format("2006-01-02"), Visits: stat.Visits,
-			})
-		}
-		views = append(views, view)
-	}
-	audit := make([]auditEventView, 0, len(auditEvents))
-	for _, event := range auditEvents {
-		audit = append(audit, auditEventView{
-			OccurredAt:    event.OccurredAt.Format("2006-01-02 15:04 UTC"),
-			ActorUsername: event.ActorUsername, OwnerUsername: event.OwnerUsername,
-			Slug: event.Slug, Action: auditAction(event.Kind),
+	for _, destination := range link.Destinations {
+		view.Destinations = append(view.Destinations, shortLinkDestinationForm{
+			Label: destination.Label, URL: destination.URL,
 		})
 	}
-	createdURL := ""
-	if createdSlug, normalizeErr := shortlink.NormalizeSlug(r.URL.Query().Get("created")); normalizeErr == nil {
-		for _, link := range links {
-			if link.Slug == createdSlug && link.OwnerUserID == actor.UserID && link.Enabled &&
-				(link.ExpiresAt.IsZero() || link.ExpiresAt.After(now)) {
-				createdURL = s.shortLinkURL(createdSlug)
-				break
-			}
-		}
-	}
-	selectedSite := ""
-	if normalized, normalizeErr := hostedsite.NormalizeName(r.URL.Query().Get("site")); normalizeErr == nil {
-		selectedSite = normalized
-	}
-	createdSite := ""
-	if normalized, normalizeErr := hostedsite.NormalizeName(r.URL.Query().Get("site_created")); normalizeErr == nil {
-		for _, value := range hostedSites {
-			if value.Name == normalized && value.OwnerUserID == session.User.ID {
-				createdSite = normalized
-				selectedSite = normalized
-				break
-			}
-		}
-	}
-	form = withShortLinkFormDefaults(form)
-	s.render(w, status, "dashboard.html", dashboardView{
-		Username: session.User.Username, CSRFToken: session.CSRFToken,
-		Assurance: session.Assurance, Role: session.User.Role,
-		ShowOwners:   session.User.Role == auth.RoleSuperuser,
-		ShortBaseURL: s.shortLinkURL(""), SiteDomain: s.config.SiteDomain,
-		CreatedURL: createdURL, CreatedSite: createdSite,
-		Create: form, Links: views, Sites: siteViews(hostedSites, s, selectedSite), Audit: audit,
-	})
+	return view
 }
 
 func (s *Server) createShortLink(w http.ResponseWriter, r *http.Request) {
@@ -521,7 +509,7 @@ func (s *Server) createShortLink(w http.ResponseWriter, r *http.Request) {
 		if message, known := shortLinkErrorMessage(err); known {
 			form.Error = message
 			status := http.StatusBadRequest
-			if errors.Is(err, shortlink.ErrSlugUnavailable) {
+			if errors.Is(err, shortlink.ErrSlugUnavailable) || errors.Is(err, shortlink.ErrLinkLimit) {
 				status = http.StatusConflict
 			}
 			s.renderDashboard(w, r, status, form)
@@ -547,7 +535,7 @@ func (s *Server) updateShortLink(w http.ResponseWriter, r *http.Request) {
 		s.renderShortLinkError(w, r, err, "Link not updated")
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, "/links/"+url.PathEscape(r.PostForm.Get("link_id")), http.StatusSeeOther)
 }
 
 func (s *Server) setShortLinkState(w http.ResponseWriter, r *http.Request) {
@@ -569,7 +557,7 @@ func (s *Server) setShortLinkState(w http.ResponseWriter, r *http.Request) {
 		s.renderShortLinkError(w, r, err, "Link state not changed")
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, "/links/"+url.PathEscape(r.PostForm.Get("link_id")), http.StatusSeeOther)
 }
 
 func (s *Server) retireShortLink(w http.ResponseWriter, r *http.Request) {
@@ -623,6 +611,7 @@ func shortLinkErrorMessage(err error) (string, bool) {
 		shortlink.ErrInvalidDestinations, shortlink.ErrDuplicateTarget,
 		shortlink.ErrInvalidTitle, shortlink.ErrInvalidDescription,
 		shortlink.ErrInvalidLabel, shortlink.ErrInvalidExpiry,
+		shortlink.ErrLinkLimit,
 	} {
 		if errors.Is(err, known) {
 			return known.Error(), true
@@ -878,6 +867,7 @@ func (s *Server) completeUserSetup(w http.ResponseWriter, r *http.Request) {
 }
 
 type usersView struct {
+	Shell      shellView
 	Users      []auth.UserSummary
 	CurrentID  string
 	CSRFToken  string
@@ -892,6 +882,7 @@ func (s *Server) usersPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, http.StatusOK, "users.html", usersView{
+		Shell: s.shell(session, "settings"),
 		Users: users, CurrentID: session.User.ID, CSRFToken: session.CSRFToken,
 		SetupHours: int(auth.SetupTokenLifetime.Hours()),
 	})
@@ -1233,6 +1224,8 @@ func (s *Server) passkeySettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, http.StatusOK, "passkeys.html", struct {
+		Shell          shellView
+		InApp          bool
 		Username       string
 		Assurance      auth.Assurance
 		CSRFToken      string
@@ -1241,7 +1234,7 @@ func (s *Server) passkeySettings(w http.ResponseWriter, r *http.Request) {
 		Sessions       []auth.SessionSummary
 		CurrentSession [32]byte
 		Events         []auth.AuthEvent
-	}{session.User.Username, session.Assurance, session.CSRFToken, records, totpConfigured, sessions, session.TokenHash, events})
+	}{s.shell(session, "settings"), managedAssurance(session), session.User.Username, session.Assurance, session.CSRFToken, records, totpConfigured, sessions, session.TokenHash, events})
 }
 
 func (s *Server) beginPasskeyRegistration(w http.ResponseWriter, r *http.Request) {

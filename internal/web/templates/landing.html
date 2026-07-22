@@ -1,0 +1,47 @@
+{{define "landing.html"}}<!doctype html>
+<html lang="en" class="no-js">
+<head>
+  {{template "head_assets"}}
+  <title>{{.Brand}} — short links and sites, self-hosted</title>
+</head>
+<body>
+  <header class="shell-header landing-header">
+    <a class="brand" href="/" aria-label="{{.Brand}} home">
+      <span class="brand-mark" aria-hidden="true">{{.Initial}}</span>
+      <span>{{.Brand}}</span>
+      <span class="brand-note">powered by wispdeck</span>
+    </a>
+    <div class="nav-links">
+      {{template "theme_button"}}
+      <a href="/login">Sign in</a>
+      <a class="btn compact" href="/login">Dashboard</a>
+    </div>
+  </header>
+
+  <main class="landing-main">
+    <div class="landing-hero">
+      <p class="landing-eyebrow">self-hosted · open source · your data</p>
+      <h1>Short links,<br>your server, your rules.</h1>
+      <p class="lede">Wispdeck is a link shortener you run yourself. Custom slugs, expiring links, visit analytics — and lightweight static sites on your own subdomains.</p>
+      <form class="landing-form" action="/" method="get">
+        <label class="sr-only" for="landing-url">URL to shorten</label>
+        <input id="landing-url" name="shorten" type="url" inputmode="url" placeholder="https://paste-a-long-url.com/anything">
+        <button type="submit" class="btn">Shorten</button>
+      </form>
+      <p class="helper">Shortening needs an account on this instance — you’ll be asked to sign in.</p>
+      <div class="feature-strip">
+        <span><span class="k">/your-slug</span> custom slugs</span>
+        <span><span class="k amber">30d</span> expiring links</span>
+        <span><span class="k">▁▃▂▆</span> visit analytics</span>
+        <span><span class="k">x.{{.SiteDomain}}</span> static sites</span>
+      </div>
+    </div>
+  </main>
+
+  <footer class="landing-footer">
+    <span>wispdeck</span>
+    <span>MIT license</span>
+    <a href="https://github.com/wispdeck/wispdeck" rel="noreferrer">github</a>
+  </footer>
+</body>
+</html>{{end}}

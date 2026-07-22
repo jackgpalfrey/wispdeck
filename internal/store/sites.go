@@ -14,6 +14,7 @@ import (
 func (s *SQLite) CreateSite(
 	ctx context.Context,
 	ownerUserID, name, title string,
+	limits site.Limits,
 	now time.Time,
 ) (site.Site, error) {
 	id, err := randomID()
@@ -25,6 +26,21 @@ func (s *SQLite) CreateSite(
 		return site.Site{}, fmt.Errorf("begin site creation: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var active bool
+	var siteCount int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM users WHERE id = ? AND status = ?),
+		       (SELECT COUNT(*) FROM sites WHERE owner_user_id = ?)`,
+		ownerUserID, auth.UserActive, ownerUserID,
+	).Scan(&active, &siteCount); err != nil {
+		return site.Site{}, fmt.Errorf("inspect site owner quota: %w", err)
+	}
+	if !active {
+		return site.Site{}, site.ErrForbidden
+	}
+	if siteCount >= limits.MaxSitesPerUser {
+		return site.Site{}, site.ErrSiteLimit
+	}
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO public_names (
 			name, owner_user_id, kind, resource_id, created_at
@@ -43,16 +59,6 @@ func (s *SQLite) CreateSite(
 		return site.Site{}, fmt.Errorf("inspect site name reservation: %w", err)
 	}
 	if rows != 1 {
-		var active bool
-		if err := tx.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM users WHERE id = ? AND status = ?)`,
-			ownerUserID, auth.UserActive,
-		).Scan(&active); err != nil {
-			return site.Site{}, fmt.Errorf("check site owner: %w", err)
-		}
-		if !active {
-			return site.Site{}, site.ErrForbidden
-		}
 		return site.Site{}, site.ErrNameUnavailable
 	}
 	result, err = tx.ExecContext(ctx, `
@@ -150,6 +156,7 @@ func (s *SQLite) CreateSiteRelease(
 	includeAll bool,
 	siteID string,
 	bundle site.Bundle,
+	limits site.Limits,
 	now time.Time,
 ) (site.Release, error) {
 	releaseID, err := randomID()
@@ -162,19 +169,33 @@ func (s *SQLite) CreateSiteRelease(
 	}
 	defer func() { _ = tx.Rollback() }()
 	var ownerUserID, name string
-	var version int
+	var version, releaseCount int
+	var ownerBytes int64
 	err = tx.QueryRowContext(ctx, `
-		SELECT s.owner_user_id, s.name, COALESCE(MAX(r.version), 0) + 1
+		SELECT s.owner_user_id, s.name, s.next_release_version,
+		       COUNT(r.id),
+		       (
+		         SELECT COALESCE(SUM(owner_release.total_bytes), 0)
+		         FROM site_releases AS owner_release
+		         JOIN sites AS owner_site ON owner_site.id = owner_release.site_id
+		         WHERE owner_site.owner_user_id = s.owner_user_id
+		       )
 		FROM sites AS s
 		LEFT JOIN site_releases AS r ON r.site_id = s.id
 		WHERE s.id = ? AND (s.owner_user_id = ? OR ? = 1)
 		GROUP BY s.id`, siteID, actorUserID, includeAll,
-	).Scan(&ownerUserID, &name, &version)
+	).Scan(&ownerUserID, &name, &version, &releaseCount, &ownerBytes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return site.Release{}, site.ErrNotFound
 	}
 	if err != nil {
 		return site.Release{}, fmt.Errorf("select site for release upload: %w", err)
+	}
+	if releaseCount >= limits.MaxReleasesPerSite {
+		return site.Release{}, site.ErrReleaseLimit
+	}
+	if ownerBytes > limits.MaxStorageBytesPerUser-bundle.TotalBytes {
+		return site.Release{}, site.ErrStorageLimit
 	}
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO site_releases (
@@ -200,8 +221,10 @@ func (s *SQLite) CreateSiteRelease(
 		}
 	}
 	result, err = tx.ExecContext(ctx, `
-		UPDATE sites SET draft_release_id = ?, updated_at = ? WHERE id = ?`,
-		releaseID, unix(now), siteID,
+		UPDATE sites
+		SET draft_release_id = ?, next_release_version = ?, updated_at = ?
+		WHERE id = ?`,
+		releaseID, version+1, unix(now), siteID,
 	)
 	if err != nil {
 		return site.Release{}, fmt.Errorf("select uploaded site draft: %w", err)
@@ -303,6 +326,147 @@ func (s *SQLite) SetSiteEnabled(
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit site state change: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) SiteUsage(
+	ctx context.Context,
+	actorUserID string,
+	includeAll bool,
+	siteID string,
+) (site.Usage, error) {
+	var usage site.Usage
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+		  (SELECT COUNT(*) FROM site_releases WHERE site_id = s.id),
+		  (SELECT COALESCE(SUM(total_bytes), 0) FROM site_releases WHERE site_id = s.id),
+		  (SELECT COUNT(*) FROM sites WHERE owner_user_id = s.owner_user_id),
+		  (
+		    SELECT COALESCE(SUM(r.total_bytes), 0)
+		    FROM site_releases AS r
+		    JOIN sites AS owner_site ON owner_site.id = r.site_id
+		    WHERE owner_site.owner_user_id = s.owner_user_id
+		  )
+		FROM sites AS s
+		WHERE s.id = ? AND (s.owner_user_id = ? OR ? = 1)`,
+		siteID, actorUserID, includeAll,
+	).Scan(&usage.SiteReleases, &usage.SiteBytes, &usage.OwnerSites, &usage.OwnerBytes)
+	if errors.Is(err, sql.ErrNoRows) {
+		return site.Usage{}, site.ErrNotFound
+	}
+	if err != nil {
+		return site.Usage{}, fmt.Errorf("query site usage: %w", err)
+	}
+	return usage, nil
+}
+
+func (s *SQLite) DeleteSiteRelease(
+	ctx context.Context,
+	actorUserID string,
+	includeAll bool,
+	siteID, releaseID string,
+	now time.Time,
+) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin site release deletion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var ownerUserID, name, draftID, publishedID string
+	var releaseExists bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT s.owner_user_id, s.name,
+		       COALESCE(s.draft_release_id, ''), COALESCE(s.published_release_id, ''),
+		       EXISTS(SELECT 1 FROM site_releases WHERE id = ? AND site_id = s.id)
+		FROM sites AS s
+		WHERE s.id = ? AND (s.owner_user_id = ? OR ? = 1)`,
+		releaseID, siteID, actorUserID, includeAll,
+	).Scan(&ownerUserID, &name, &draftID, &publishedID, &releaseExists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return site.ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("select site release for deletion: %w", err)
+	}
+	if !releaseExists {
+		return site.ErrNotFound
+	}
+	if releaseID == draftID || releaseID == publishedID {
+		return site.ErrSelectedRelease
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM site_files WHERE release_id = ?`, releaseID); err != nil {
+		return fmt.Errorf("delete site release files: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM site_releases WHERE id = ? AND site_id = ?`, releaseID, siteID)
+	if err != nil {
+		return fmt.Errorf("delete site release: %w", err)
+	}
+	if err := requireOneRow(result, "site release"); err != nil {
+		return site.ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sites SET updated_at = ? WHERE id = ?`, unix(now), siteID); err != nil {
+		return fmt.Errorf("update site after release deletion: %w", err)
+	}
+	if err := recordCrossOwnerSiteAudit(
+		ctx, tx, actorUserID, ownerUserID, siteID, name, "release_deleted", includeAll, now,
+	); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit site release deletion: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) PurgeSiteContent(
+	ctx context.Context,
+	actorUserID string,
+	includeAll bool,
+	siteID string,
+	now time.Time,
+) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin site content purge: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var ownerUserID, name string
+	err = tx.QueryRowContext(ctx, `
+		SELECT owner_user_id, name FROM sites
+		WHERE id = ? AND (owner_user_id = ? OR ? = 1)`,
+		siteID, actorUserID, includeAll,
+	).Scan(&ownerUserID, &name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return site.ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("select site for content purge: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE sites
+		SET enabled = 0, draft_release_id = NULL, published_release_id = NULL, updated_at = ?
+		WHERE id = ?`, unix(now), siteID,
+	); err != nil {
+		return fmt.Errorf("clear site release pointers: %w", err)
+	}
+	for _, statement := range []string{
+		`DELETE FROM site_preview_grants WHERE site_id = ?`,
+		`DELETE FROM site_preview_sessions WHERE site_id = ?`,
+		`DELETE FROM site_files WHERE release_id IN (SELECT id FROM site_releases WHERE site_id = ?)`,
+		`DELETE FROM site_releases WHERE site_id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement, siteID); err != nil {
+			return fmt.Errorf("purge site content: %w", err)
+		}
+	}
+	if err := recordCrossOwnerSiteAudit(
+		ctx, tx, actorUserID, ownerUserID, siteID, name, "purged", includeAll, now,
+	); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit site content purge: %w", err)
 	}
 	return nil
 }

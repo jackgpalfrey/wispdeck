@@ -16,16 +16,17 @@ import (
 )
 
 const (
-	MinSlugLength        = 1
-	MaxSlugLength        = 48
-	MaxTargetLength      = 4096
-	MaxTitleLength       = 120
-	MaxDescriptionLength = 1000
-	MaxLabelLength       = 120
-	MaxDestinations      = 25
-	StatsWindowDays      = 30
-	automaticLength      = 10
-	maxPendingBuckets    = 10_000
+	MinSlugLength          = 1
+	MaxSlugLength          = 48
+	MaxTargetLength        = 4096
+	MaxTitleLength         = 120
+	MaxDescriptionLength   = 1000
+	MaxLabelLength         = 120
+	MaxDestinations        = 25
+	StatsWindowDays        = 30
+	DefaultMaxLinksPerUser = 1_000
+	automaticLength        = 10
+	maxPendingBuckets      = 10_000
 )
 
 var (
@@ -43,7 +44,14 @@ var (
 	ErrInvalidDescription  = fmt.Errorf("private notes must not exceed %d characters or contain control characters", MaxDescriptionLength)
 	ErrInvalidLabel        = fmt.Errorf("destination labels must not exceed %d characters or contain control characters", MaxLabelLength)
 	ErrInvalidExpiry       = errors.New("expiry must be a future UTC date and time")
+	ErrLinkLimit           = errors.New("short-link limit reached")
 )
+
+type Limits struct {
+	MaxLinksPerUser int
+}
+
+func DefaultLimits() Limits { return Limits{MaxLinksPerUser: DefaultMaxLinksPerUser} }
 
 var reservedSlugs = map[string]struct{}{
 	"account":  {},
@@ -51,6 +59,7 @@ var reservedSlugs = map[string]struct{}{
 	"api":      {},
 	"assets":   {},
 	"data":     {},
+	"healthz":  {},
 	"links":    {},
 	"login":    {},
 	"logout":   {},
@@ -149,7 +158,7 @@ type AuditEvent struct {
 // Repository owns durable short-link state. Owner-aware mutations must apply
 // their authorization predicate in the same SQL statement as the mutation.
 type Repository interface {
-	CreateShortLink(context.Context, string, Link, time.Time) (Link, error)
+	CreateShortLink(context.Context, string, Link, Limits, time.Time) (Link, error)
 	ShortLinks(context.Context, string, bool) ([]Link, error)
 	UpdateShortLink(context.Context, string, string, bool, Input, time.Time) error
 	SetShortLinkEnabled(context.Context, string, string, bool, bool, time.Time) error
@@ -162,21 +171,31 @@ type Repository interface {
 
 type Service struct {
 	repository Repository
+	limits     Limits
 	now        func() time.Time
 	counter    *visitCounter
 	flushMu    sync.Mutex
 }
 
-func NewService(repository Repository) (*Service, error) {
+func NewService(repository Repository, limits Limits) (*Service, error) {
 	if repository == nil {
 		return nil, errors.New("short-link repository is required")
 	}
+	if limits == (Limits{}) {
+		limits = DefaultLimits()
+	}
+	if limits.MaxLinksPerUser < 1 {
+		return nil, errors.New("short-link limits are invalid")
+	}
 	return &Service{
 		repository: repository,
+		limits:     limits,
 		now:        time.Now,
 		counter:    newVisitCounter(maxPendingBuckets),
 	}, nil
 }
+
+func (s *Service) Limits() Limits { return s.limits }
 
 // Create creates a link for the authenticated actor. An empty slug requests a
 // cryptographically random one; explicit slugs are never silently replaced.
@@ -195,7 +214,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, input Input) (Link, e
 		if err != nil {
 			return Link{}, err
 		}
-		return s.repository.CreateShortLink(ctx, actor.UserID, linkFromInput(validated), now)
+		return s.repository.CreateShortLink(ctx, actor.UserID, linkFromInput(validated), s.limits, now)
 	}
 
 	for range 8 {
@@ -203,7 +222,7 @@ func (s *Service) Create(ctx context.Context, actor Actor, input Input) (Link, e
 		if err != nil {
 			return Link{}, err
 		}
-		link, createErr := s.repository.CreateShortLink(ctx, actor.UserID, linkFromInput(validated), now)
+		link, createErr := s.repository.CreateShortLink(ctx, actor.UserID, linkFromInput(validated), s.limits, now)
 		if createErr == nil {
 			return link, nil
 		}

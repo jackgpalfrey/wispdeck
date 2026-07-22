@@ -1,32 +1,38 @@
 {{define "totp_setup.html"}}<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{template "head_assets"}}
   <title>Set up authenticator — Wispdeck</title>
-  <link rel="stylesheet" href="/assets/admin.css">
 </head>
 <body>
-  <main class="panel">
-    <h1>Set up authenticator app</h1>
-    <ol class="setup-steps">
-      <li>Scan this QR code with your authenticator app.</li>
-      <li>Enter the six-digit code it shows to confirm setup.</li>
-    </ol>
-    <img class="qr-code" src="/security/totp/qr" width="256" height="256" alt="Authenticator setup QR code">
-    <details>
-      <summary>Enter a setup key instead</summary>
-      <p class="subtle">Account: Wispdeck · Type: time based · Period: 30 seconds</p>
-      <code class="setup-secret">{{.Secret}}</code>
-    </details>
-    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
-    <form action="/security/totp/confirm" method="post">
-      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-      <label for="totp-code">Six-digit code</label>
-      <input id="totp-code" name="totp_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus>
-      <button type="submit">Confirm authenticator</button>
-    </form>
-    <p><a href="/security/passkeys">Cancel setup</a></p>
+  <main class="auth-main">
+    <div class="auth-box">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">w</span>
+        <span>Wispdeck</span>
+      </a>
+      <div class="auth-card on-card">
+        <div>
+          <h1>Set up authenticator app</h1>
+          <p class="auth-sub">Scan the QR code, then enter the six-digit code it shows.</p>
+        </div>
+        <img class="qr-code" src="/security/totp/qr" width="256" height="256" alt="Authenticator setup QR code">
+        <details>
+          <summary>Enter a setup key instead</summary>
+          <p class="auth-sub">Account: Wispdeck · Type: time based · Period: 30 seconds</p>
+          <code class="setup-secret">{{.Secret}}</code>
+        </details>
+        {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+        <form action="/security/totp/confirm" method="post">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <label class="field">Six-digit code
+            <input id="totp-code" name="totp_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus>
+          </label>
+          <button type="submit" class="btn">Confirm authenticator</button>
+        </form>
+      </div>
+      <p class="auth-foot"><a href="/security/passkeys">Cancel setup</a></p>
+    </div>
   </main>
 </body>
 </html>{{end}}

@@ -1,37 +1,48 @@
 {{define "passkey_login.html"}}<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{template "head_assets"}}
   <title>Two-step verification — Wispdeck</title>
-  <link rel="stylesheet" href="/assets/admin.css">
   <script src="/assets/webauthn.js" defer></script>
 </head>
 <body>
-  <main class="panel">
-    <h1>Two-step verification</h1>
-    <p class="subtle">Your password was accepted. Complete sign-in with another factor.</p>
-    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
-    {{if .HasPasskey}}
-    <p id="passkey-status" class="error hidden" role="alert"></p>
-    <button type="button" data-passkey-login>Use passkey</button>
-    <button type="button" class="secondary" data-use-another-factor>Use another method</button>
-    {{end}}
-    {{if .HasTOTP}}
-    <form action="/login/totp" method="post">
-      <label for="totp-code">Authenticator code</label>
-      <input id="totp-code" name="totp_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus>
-      <button type="submit"{{if .HasPasskey}} class="secondary"{{end}}>Use authenticator code</button>
-    </form>
-    {{end}}
-    <details>
-      <summary>Use a recovery code</summary>
-      <form action="/login/recovery" method="post">
-        <label for="recovery-code">Recovery code</label>
-        <input id="recovery-code" name="recovery_code" autocomplete="one-time-code" required>
-        <button type="submit" class="secondary">Recover account</button>
-      </form>
-    </details>
+  <main class="auth-main">
+    <div class="auth-box">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">w</span>
+        <span>Wispdeck</span>
+      </a>
+      <div class="auth-card on-card">
+        <div>
+          <h1>Two-step verification</h1>
+          <p class="auth-sub">Your password was accepted. Complete sign-in with another factor.</p>
+        </div>
+        {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+        {{if .HasPasskey}}
+        <p id="passkey-status" class="error hidden" role="alert"></p>
+        <button type="button" class="btn" data-passkey-login>Use passkey</button>
+        <button type="button" class="btn quiet" data-use-another-factor>Use another method</button>
+        {{end}}
+        {{if .HasTOTP}}
+        <form action="/login/totp" method="post">
+          <label class="field">Authenticator code
+            <input id="totp-code" name="totp_code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus>
+          </label>
+          <button type="submit" class="btn{{if .HasPasskey}} quiet{{end}}">Use authenticator code</button>
+        </form>
+        {{end}}
+        <details>
+          <summary>Use a recovery code</summary>
+          <form action="/login/recovery" method="post">
+            <label class="field">Recovery code
+              <input id="recovery-code" name="recovery_code" autocomplete="one-time-code" required>
+            </label>
+            <button type="submit" class="btn quiet">Recover account</button>
+          </form>
+        </details>
+      </div>
+      <p class="auth-foot"><a href="/login">← start over</a></p>
+    </div>
   </main>
 </body>
 </html>{{end}}

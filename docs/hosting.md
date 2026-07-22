@@ -47,8 +47,29 @@ Current limits are:
 
 Paths must be canonical relative UTF-8 paths. Absolute paths, `..`, backslashes,
 control characters, symlinks, encrypted entries, case-insensitive duplicates,
-and the reserved `_wispdeck` tree are rejected. Content types are derived from
-file extensions and responses use `X-Content-Type-Options: nosniff`.
+and the reserved `_wispdeck` and `_wispist` trees are rejected. Content types
+are derived from file extensions and responses use
+`X-Content-Type-Options: nosniff`.
+
+## Wispist data
+
+A release may place `wispist.json` at the archive root to declare
+browser-visible document collections. Wispdeck validates the declaration during
+upload and rejects the complete release if it is malformed, ambiguous,
+unsupported, or raises an installation limit. A release without the file has no
+accessible collections.
+
+Wispdeck inserts the Wispist bootstrap before site-authored elements in every
+served HTML `head`, so site JavaScript can use `globalThis.wispist` without a
+connection step or API key. The complete data and client contract is in
+[`wispist.md`](wispist.md). `/_wispist/` is a platform route on every content
+origin and can never be supplied by an uploaded file.
+
+Public releases use the site's stable `live` data namespace. Draft previews use
+a separate stable `draft` namespace. Publishing or rolling back switches code
+and policy but does not copy, replace, or delete live documents. The Current
+selection on a preview origin reads live data with an unconditional server-side
+read-only override.
 
 ## Origin and preview boundary
 
@@ -118,16 +139,50 @@ when testing from another machine.
 
 ## Persistence and operations
 
-Site metadata, release manifests, and file bodies currently live in SQLite.
-Back up `data/wispdeck.db` and `data/auth.key` together as described in the main
-README. The database migration is atomic. Releases are intentionally immutable,
-and v1 has no name-release or site-deletion operation.
+Site metadata, release manifests, and file bodies live in the control SQLite
+database. Wispist keeps one separate SQLite file per stable site ID beneath
+`data/wispist/` by default. Back up that directory with `data/wispdeck.db` and
+`data/auth.key` as one offline archive using the commands in
+[`operations.md`](operations.md). Control and Wispist schema migrations are
+independent and atomic. Releases are intentionally immutable.
+An owner may delete an older release only when it is neither the current public
+release nor the selected draft. Release version numbers remain monotonic after
+cleanup.
+
+The site Data page exposes logical document usage for the live and draft
+namespaces. Owners and superusers can inspect paginated collections, export one
+consistent JSON snapshot containing both namespaces, replace a document with
+its current revision, delete a document, or clear a collection. These are
+trusted application-origin operations and are not added to the public site API.
+Collection clearing emits ordinary delete changes so connected sites reconcile
+normally.
+
+“Erase site contents” disables the site, invalidates previews, deletes all
+release bodies, and then hard-purges live and draft Wispist documents plus
+retained mutation history. The control-plane step happens first so no public or
+preview request can race new data into the purge. The `sites` row and
+`public_names` reservation remain: only the original owner can upload and
+republish that address later.
+
+Both SQLite layers enable secure deletion so removed document and release
+payloads are overwritten when their database cells are deleted. Freed pages are
+reused by later writes; the physical database file is not promised to shrink
+immediately. An operator can perform an offline SQLite vacuum when returning
+filesystem space matters.
+
+Default control-plane limits are:
+
+- 1,000 permanently reserved short-link names per user;
+- 100 hosted sites per user;
+- 25 retained releases per site; and
+- 1 GiB of retained release content per user.
+
+Operators configure those limits with `--max-links-per-user`,
+`--max-sites-per-user`, `--max-releases-per-site`, and
+`--max-site-storage-mib-per-user`. Checks run inside the same SQLite transaction
+as name reservation or upload, so concurrent requests cannot overrun a limit.
 
 This design has no per-site idle compute cost: there is one Wispdeck process and
 site work happens only while serving an upload, management action, or viewer
 request. It is not a scale-to-zero application runtime; the small Wispdeck
 control process and its SQLite storage remain running.
-
-The lightweight database API for hosted browser applications is a later slice.
-Its routes are reserved beneath `/_wispdeck/`, but no data API is exposed by
-this implementation.

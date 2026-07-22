@@ -100,7 +100,8 @@ func normalizeFilePath(value string) (string, error) {
 		}
 	}
 	lower := strings.ToLower(clean)
-	if lower == "_wispdeck" || strings.HasPrefix(lower, "_wispdeck/") {
+	if lower == "_wispdeck" || strings.HasPrefix(lower, "_wispdeck/") ||
+		lower == "_wispist" || strings.HasPrefix(lower, "_wispist/") {
 		return "", fmt.Errorf("%w: path %q is reserved", ErrInvalidFile, value)
 	}
 	return clean, nil

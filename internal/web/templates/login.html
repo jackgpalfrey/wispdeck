@@ -1,23 +1,34 @@
 {{define "login.html"}}<!doctype html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{template "head_assets"}}
   <title>Sign in — Wispdeck</title>
-  <link rel="stylesheet" href="/assets/admin.css">
 </head>
 <body>
-  <main class="panel">
-    <h1>Wispdeck</h1>
-    <p class="subtle">Sign in to manage this installation.</p>
-    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
-    <form action="/login" method="post">
-      <label for="username">Username</label>
-      <input id="username" name="username" value="{{.Username}}" autocomplete="username" required autofocus maxlength="64">
-      <label for="password">Password</label>
-      <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
-      <button type="submit">Sign in</button>
-    </form>
+  <main class="auth-main">
+    <div class="auth-box">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">w</span>
+        <span>Wispdeck</span>
+      </a>
+      <div class="auth-card on-card">
+        <div>
+          <h1>Sign in</h1>
+          <p class="auth-sub">to this Wispdeck instance</p>
+        </div>
+        <form action="/login" method="post">
+          <label class="field">Username
+            <input id="username" name="username" value="{{.Username}}" autocomplete="username" required autofocus maxlength="64">
+          </label>
+          <label class="field">Password
+            <input id="password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required maxlength="1024">
+          </label>
+          {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+          <button type="submit" class="btn">Sign in</button>
+        </form>
+      </div>
+      <p class="auth-foot"><a href="/">← back to the front page</a></p>
+    </div>
   </main>
 </body>
 </html>{{end}}
