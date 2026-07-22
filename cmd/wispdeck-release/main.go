@@ -32,6 +32,7 @@ const usage = `Usage:
   wispdeck-release keygen --private FILE --public FILE
   wispdeck-release manifest --private-key FILE --version vMAJOR.MINOR.PATCH \
     --notes FILE --asset GOOS/GOARCH,FILE,HTTPS_URL [--asset ...] --output FILE
+  wispdeck-release verify --public-key FILE --manifest FILE
 `
 
 func run(args []string, stdout io.Writer) error {
@@ -43,6 +44,8 @@ func run(args []string, stdout io.Writer) error {
 		return generateKey(args[1:], stdout)
 	case "manifest":
 		return createManifest(args[1:], stdout)
+	case "verify":
+		return verifyManifest(args[1:], stdout)
 	case "help", "-h", "--help":
 		_, _ = io.WriteString(stdout, usage)
 		return nil
@@ -145,6 +148,39 @@ func createManifest(args []string, stdout io.Writer) error {
 		return fmt.Errorf("write release manifest: %w", err)
 	}
 	_, err = fmt.Fprintf(stdout, "Created signed manifest %q for %s with %d assets.\n", *outputPath, *version, len(releaseAssets))
+	return err
+}
+
+func verifyManifest(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("verify", flag.ContinueOnError)
+	publicPath := flags.String("public-key", "", "base64 Ed25519 public-key file")
+	manifestPath := flags.String("manifest", "", "signed update-manifest file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *publicPath == "" || *manifestPath == "" {
+		return errors.New("verify requires --public-key and --manifest")
+	}
+	publicBody, err := readSmallRegular(*publicPath, 4096)
+	if err != nil {
+		return fmt.Errorf("read public key: %w", err)
+	}
+	publicKey, err := updater.ParsePublicKey(string(publicBody))
+	if err != nil {
+		return err
+	}
+	manifestBody, err := readSmallRegular(*manifestPath, updater.MaxManifestBytes)
+	if err != nil {
+		return fmt.Errorf("read signed manifest: %w", err)
+	}
+	manifest, err := updater.VerifyEnvelope(manifestBody, publicKey, false)
+	if err != nil {
+		return fmt.Errorf("verify signed manifest: %w", err)
+	}
+	_, err = fmt.Fprintf(
+		stdout, "Verified signed manifest %q for %s with %d assets.\n",
+		*manifestPath, manifest.Release.Version, len(manifest.Release.Assets),
+	)
 	return err
 }
 

@@ -85,10 +85,19 @@ jobs:
           set -euo pipefail
           install -d -m 0755 dist
 
+          public_key="$(tr -d '\r\n' <release/release.pub)"
+          if [[ -z "$public_key" ]]; then
+            echo "The committed release public key is empty." >&2
+            exit 1
+          fi
+          manifest_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/stable.json"
+
           ldflags="-s -w \
             -X github.com/wispdeck/wispdeck/internal/buildinfo.version=$VERSION \
             -X github.com/wispdeck/wispdeck/internal/buildinfo.commit=$COMMIT \
-            -X github.com/wispdeck/wispdeck/internal/buildinfo.builtAt=$BUILT_AT"
+            -X github.com/wispdeck/wispdeck/internal/buildinfo.builtAt=$BUILT_AT \
+            -X github.com/wispdeck/wispdeck/internal/buildinfo.updateManifestURL=$manifest_url \
+            -X github.com/wispdeck/wispdeck/internal/buildinfo.updatePublicKey=$public_key"
 
           for target in linux/amd64 linux/arm64; do
             os="${target%/*}"
@@ -99,10 +108,6 @@ jobs:
           done
 
           chmod 0755 dist/wispdeck-linux-amd64 dist/wispdeck-linux-arm64
-          (
-            cd dist
-            sha256sum wispdeck-linux-amd64 wispdeck-linux-arm64 >SHA256SUMS
-          )
 
       - name: Verify release metadata
         shell: bash
@@ -119,8 +124,66 @@ jobs:
             --arg built_at "$BUILT_AT" \
             '.version == $version and .commit == $commit and .builtAt == $built_at' \
             <<<"$metadata"
+
+      - name: Generate update release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$TAG" \
+            --jq .body \
+            >dist/RELEASE_NOTES.md
+          test -s dist/RELEASE_NOTES.md
+
+      - name: Sign and verify update manifest
+        shell: bash
+        env:
+          RELEASE_PRIVATE_KEY: ${{ secrets.WISPDECK_RELEASE_PRIVATE_KEY }}
+          VERSION: ${{ steps.release.outputs.tag }}
+          BUILT_AT: ${{ steps.release.outputs.built_at }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RELEASE_PRIVATE_KEY" ]]; then
+            echo "The WISPDECK_RELEASE_PRIVATE_KEY repository secret is not configured." >&2
+            exit 1
+          fi
+
+          private_key="$RUNNER_TEMP/wispdeck-release.key"
+          release_helper="$RUNNER_TEMP/wispdeck-release"
+          trap 'rm -f "$private_key" "$release_helper"' EXIT
+          printf '%s\n' "$RELEASE_PRIVATE_KEY" >"$private_key"
+          chmod 0600 "$private_key"
+
+          go build -trimpath -o "$release_helper" ./cmd/wispdeck-release
+          "$release_helper" manifest \
+            --private-key "$private_key" \
+            --version "$VERSION" \
+            --published-at "$BUILT_AT" \
+            --notes dist/RELEASE_NOTES.md \
+            --asset "linux/amd64,dist/wispdeck-linux-amd64,https://github.com/$GITHUB_REPOSITORY/releases/download/$VERSION/wispdeck-linux-amd64" \
+            --asset "linux/arm64,dist/wispdeck-linux-arm64,https://github.com/$GITHUB_REPOSITORY/releases/download/$VERSION/wispdeck-linux-arm64" \
+            --output dist/stable.json
+          "$release_helper" verify \
+            --public-key release/release.pub \
+            --manifest dist/stable.json
+
+      - name: Create and verify checksums
+        shell: bash
+        run: |
+          set -euo pipefail
           (
             cd dist
+            sha256sum \
+              stable.json \
+              wispdeck-linux-amd64 \
+              wispdeck-linux-arm64 \
+              >SHA256SUMS
             sha256sum --check SHA256SUMS
           )
 
@@ -139,6 +202,7 @@ jobs:
           gh release create "$TAG" \
             dist/wispdeck-linux-amd64 \
             dist/wispdeck-linux-arm64 \
+            dist/stable.json \
             dist/SHA256SUMS \
             --draft \
             --generate-notes \

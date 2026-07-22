@@ -75,6 +75,28 @@ func TestKeygenAndManifest(t *testing.T) {
 		manifest.Release.Notes != "A stable release." {
 		t.Fatalf("manifest = %+v", manifest)
 	}
+	output.Reset()
+	if err := run([]string{
+		"verify", "--public-key", publicPath, "--manifest", manifestPath,
+	}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Verified signed manifest") {
+		t.Fatalf("verify output = %q", output.String())
+	}
+
+	otherPrivatePath := filepath.Join(root, "other-private.key")
+	otherPublicPath := filepath.Join(root, "other-public.key")
+	if err := run([]string{
+		"keygen", "--private", otherPrivatePath, "--public", otherPublicPath,
+	}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"verify", "--public-key", otherPublicPath, "--manifest", manifestPath,
+	}, &output); err == nil {
+		t.Fatal("verified manifest with an unrelated public key")
+	}
 	if err := run([]string{
 		"manifest", "--private-key", privatePath, "--version", "v1.2.3-rc1",
 		"--notes", notesPath,

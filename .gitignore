@@ -1,7 +1,9 @@
 /wispdeck
 /data/
+/release-secrets/
+/release-out/
+/release/*.key
 *.db
 *.db-shm
 *.db-wal
 coverage.out
-

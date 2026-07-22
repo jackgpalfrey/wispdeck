@@ -41,9 +41,28 @@ Pushing an annotated stable tag starts `.github/workflows/release.yml`. The
 workflow rejects tags that do not use the exact `vMAJOR.MINOR.PATCH` form or
 whose commit is not reachable from `main`. It verifies dependencies, runs the
 test suite, vet, and the race detector, then builds static Linux binaries for
-amd64 and arm64 with the tag, source commit, and UTC build time embedded. A
-GitHub Release is published only after its binaries and `SHA256SUMS` have been
-attached to a draft release.
+amd64 and arm64 with the tag, source commit, UTC build time, stable manifest
+URL, and committed release public key embedded.
+
+The workflow reads the private half of that key from the
+`WISPDECK_RELEASE_PRIVATE_KEY` GitHub Actions secret. It generates release
+notes, signs `stable.json`, verifies the resulting envelope against
+`release/release.pub`, and calculates `SHA256SUMS`. A GitHub Release is
+published only after all four assets have been attached to a draft release.
+Configure a new repository once before its first tag:
+
+```sh
+./wispdeck-release keygen \
+  --private "$HOME/.local/share/wispdeck-release/release.key" \
+  --public release/release.pub
+gh secret set WISPDECK_RELEASE_PRIVATE_KEY \
+  < "$HOME/.local/share/wispdeck-release/release.key"
+```
+
+Never commit the private key. Keep a separate encrypted backup because a lost
+key requires a deliberate transition release before existing installations can
+trust a replacement. The public key is deliberately committed and distributed
+inside every release binary.
 
 Create and push a release tag from a clean `main` checkout:
 
@@ -52,11 +71,11 @@ git tag -a v0.2.0 -m "Wispdeck v0.2.0"
 git push origin v0.2.0
 ```
 
-The GitHub Release workflow does not hold the Ed25519 release-signing key and
-does not publish `stable.json`. Signed in-application updates remain a separate
-release step until the repository has a protected CI signing secret and the
-workflow is explicitly extended to produce the stable manifest described
-below. GitHub Release binaries remain installable manually in the meantime.
+The latest published release exposes its signed manifest at
+`https://github.com/OWNER/REPOSITORY/releases/latest/download/stable.json`.
+Release binaries use that URL by default, while `--update-manifest-url` and
+`--update-public-key-file` remain available for independently hosted release
+streams.
 
 ## Production preflight
 
