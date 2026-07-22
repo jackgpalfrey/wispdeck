@@ -35,6 +35,29 @@ go build -trimpath \
 Only exact stable tags in the form `vMAJOR.MINOR.PATCH` participate in updates.
 Development builds, prereleases, build metadata, and downgrades are rejected.
 
+## GitHub release automation
+
+Pushing an annotated stable tag starts `.github/workflows/release.yml`. The
+workflow rejects tags that do not use the exact `vMAJOR.MINOR.PATCH` form or
+whose commit is not reachable from `main`. It verifies dependencies, runs the
+test suite, vet, and the race detector, then builds static Linux binaries for
+amd64 and arm64 with the tag, source commit, and UTC build time embedded. A
+GitHub Release is published only after its binaries and `SHA256SUMS` have been
+attached to a draft release.
+
+Create and push a release tag from a clean `main` checkout:
+
+```sh
+git tag -a v0.2.0 -m "Wispdeck v0.2.0"
+git push origin v0.2.0
+```
+
+The GitHub Release workflow does not hold the Ed25519 release-signing key and
+does not publish `stable.json`. Signed in-application updates remain a separate
+release step until the repository has a protected CI signing secret and the
+workflow is explicitly extended to produce the stable manifest described
+below. GitHub Release binaries remain installable manually in the meantime.
+
 ## Production preflight
 
 Run `doctor` as the same service account, with the same paths and origin flags
