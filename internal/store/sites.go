@@ -14,6 +14,7 @@ import (
 func (s *SQLite) CreateSite(
 	ctx context.Context,
 	ownerUserID, name, title string,
+	allowReclaim bool,
 	limits site.Limits,
 	now time.Time,
 ) (site.Site, error) {
@@ -41,27 +42,19 @@ func (s *SQLite) CreateSite(
 	if siteCount >= limits.MaxSitesPerUser {
 		return site.Site{}, site.ErrSiteLimit
 	}
-	result, err := tx.ExecContext(ctx, `
-		INSERT INTO public_names (
-			name, owner_user_id, kind, resource_id, created_at
-		)
-		SELECT ?, u.id, 'site', ?, ?
-		FROM users AS u
-		WHERE u.id = ? AND u.status = ?
-		ON CONFLICT(name) DO NOTHING`,
-		name, id, unix(now), ownerUserID, auth.UserActive,
+	claim, err := claimPublicName(
+		ctx, tx, name, ownerUserID, "site", id, now, allowReclaim,
 	)
 	if err != nil {
-		return site.Site{}, fmt.Errorf("reserve site name: %w", err)
+		return site.Site{}, err
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return site.Site{}, fmt.Errorf("inspect site name reservation: %w", err)
-	}
-	if rows != 1 {
+	switch claim {
+	case publicNameNeedsConfirmation:
+		return site.Site{}, site.ErrReclaimConfirmation
+	case publicNameUnavailable:
 		return site.Site{}, site.ErrNameUnavailable
 	}
-	result, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO sites (
 			id, owner_user_id, name, title, enabled, created_at, updated_at
 		) VALUES (?, ?, ?, ?, 1, ?, ?)`,

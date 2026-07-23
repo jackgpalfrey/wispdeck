@@ -15,6 +15,7 @@ func (s *SQLite) CreateShortLink(
 	ctx context.Context,
 	ownerUserID string,
 	value shortlink.Link,
+	allowReclaim bool,
 	limits shortlink.Limits,
 	now time.Time,
 ) (shortlink.Link, error) {
@@ -28,42 +29,43 @@ func (s *SQLite) CreateShortLink(
 	}
 	defer func() { _ = tx.Rollback() }()
 	var active bool
-	var linkCount int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT EXISTS(SELECT 1 FROM users WHERE id = ? AND status = ?),
-		       (SELECT COUNT(*) FROM short_links WHERE owner_user_id = ?)`,
-		ownerUserID, auth.UserActive, ownerUserID,
-	).Scan(&active, &linkCount); err != nil {
-		return shortlink.Link{}, fmt.Errorf("inspect short-link owner quota: %w", err)
+		SELECT EXISTS(SELECT 1 FROM users WHERE id = ? AND status = ?)`,
+		ownerUserID, auth.UserActive,
+	).Scan(&active); err != nil {
+		return shortlink.Link{}, fmt.Errorf("inspect short-link owner: %w", err)
 	}
 	if !active {
 		return shortlink.Link{}, shortlink.ErrForbidden
 	}
-	if linkCount >= limits.MaxLinksPerUser {
-		return shortlink.Link{}, shortlink.ErrLinkLimit
-	}
-	result, err := tx.ExecContext(ctx, `
-		INSERT INTO public_names (
-			name, owner_user_id, kind, resource_id, created_at
-		)
-		SELECT ?, u.id, 'link', ?, ?
-		FROM users AS u
-		WHERE u.id = ? AND u.status = ?
-		ON CONFLICT(name) DO NOTHING`,
-		value.Slug, id, unix(now), ownerUserID, auth.UserActive,
+	claim, err := claimPublicName(
+		ctx, tx, value.Slug, ownerUserID, "link", id, now, allowReclaim,
 	)
 	if err != nil {
-		return shortlink.Link{}, fmt.Errorf("reserve short-link name: %w", err)
+		return shortlink.Link{}, err
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return shortlink.Link{}, fmt.Errorf("inspect short-link name reservation: %w", err)
-	}
-	if rows != 1 {
+	switch claim {
+	case publicNameNeedsConfirmation:
+		return shortlink.Link{}, shortlink.ErrReclaimConfirmation
+	case publicNameUnavailable:
 		return shortlink.Link{}, shortlink.ErrSlugUnavailable
 	}
+	if claim == publicNameClaimed {
+		var linkNames int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM public_names
+			WHERE owner_user_id = ? AND kind = 'link'`,
+			ownerUserID,
+		).Scan(&linkNames); err != nil {
+			return shortlink.Link{}, fmt.Errorf("inspect short-link owner quota: %w", err)
+		}
+		if linkNames > limits.MaxLinksPerUser {
+			return shortlink.Link{}, shortlink.ErrLinkLimit
+		}
+	}
 
-	result, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO short_links (
 			id, owner_user_id, slug, title, description, mode, enabled,
 			created_at, updated_at, expires_at
@@ -77,7 +79,7 @@ func (s *SQLite) CreateShortLink(
 	if err != nil {
 		return shortlink.Link{}, fmt.Errorf("insert short link: %w", err)
 	}
-	rows, err = result.RowsAffected()
+	rows, err := result.RowsAffected()
 	if err != nil {
 		return shortlink.Link{}, fmt.Errorf("inspect short-link insert: %w", err)
 	}

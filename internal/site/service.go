@@ -29,21 +29,22 @@ const (
 )
 
 var (
-	ErrForbidden       = errors.New("site operation is forbidden")
-	ErrNotFound        = errors.New("site not found")
-	ErrNameUnavailable = errors.New("that public name is already in use")
-	ErrInvalidName     = errors.New("site name must use lowercase letters, numbers, or hyphens")
-	ErrInvalidTitle    = fmt.Errorf("private title must not exceed %d characters or contain control characters", MaxTitleLength)
-	ErrInvalidBundle   = errors.New("bundle must be a ZIP archive containing a root index.html")
-	ErrBundleTooLarge  = fmt.Errorf("expanded bundle must not exceed %d MiB", MaxBundleBytes>>20)
-	ErrTooManyFiles    = fmt.Errorf("bundle must not contain more than %d files", MaxFiles)
-	ErrInvalidFile     = errors.New("bundle contains an invalid file")
-	ErrNoDraft         = errors.New("site has no draft release")
-	ErrInvalidPreview  = errors.New("preview access is invalid or expired")
-	ErrSiteLimit       = errors.New("site limit reached")
-	ErrReleaseLimit    = errors.New("release limit reached for this site")
-	ErrStorageLimit    = errors.New("hosted-site storage limit reached")
-	ErrSelectedRelease = errors.New("the current draft or published release cannot be deleted")
+	ErrForbidden           = errors.New("site operation is forbidden")
+	ErrNotFound            = errors.New("site not found")
+	ErrNameUnavailable     = errors.New("that public name is already in use")
+	ErrReclaimConfirmation = errors.New("confirm that you want to reuse this retired short name")
+	ErrInvalidName         = errors.New("site name must use lowercase letters, numbers, or hyphens")
+	ErrInvalidTitle        = fmt.Errorf("private title must not exceed %d characters or contain control characters", MaxTitleLength)
+	ErrInvalidBundle       = errors.New("bundle must be a ZIP archive containing a root index.html")
+	ErrBundleTooLarge      = fmt.Errorf("expanded bundle must not exceed %d MiB", MaxBundleBytes>>20)
+	ErrTooManyFiles        = fmt.Errorf("bundle must not contain more than %d files", MaxFiles)
+	ErrInvalidFile         = errors.New("bundle contains an invalid file")
+	ErrNoDraft             = errors.New("site has no draft release")
+	ErrInvalidPreview      = errors.New("preview access is invalid or expired")
+	ErrSiteLimit           = errors.New("site limit reached")
+	ErrReleaseLimit        = errors.New("release limit reached for this site")
+	ErrStorageLimit        = errors.New("hosted-site storage limit reached")
+	ErrSelectedRelease     = errors.New("the current draft or published release cannot be deleted")
 )
 
 type Limits struct {
@@ -103,6 +104,12 @@ type Site struct {
 	Releases           []Release
 }
 
+type CreateInput struct {
+	Name             string
+	Title            string
+	ConfirmedReclaim string
+}
+
 type Usage struct {
 	SiteReleases int
 	SiteBytes    int64
@@ -124,7 +131,7 @@ type PreviewGrant struct {
 }
 
 type Repository interface {
-	CreateSite(context.Context, string, string, string, Limits, time.Time) (Site, error)
+	CreateSite(context.Context, string, string, string, bool, Limits, time.Time) (Site, error)
 	Sites(context.Context, string, bool) ([]Site, error)
 	CreateSiteRelease(context.Context, string, bool, string, Bundle, Limits, time.Time) (Release, error)
 	PublishSiteRelease(context.Context, string, bool, string, string, time.Time) error
@@ -162,18 +169,26 @@ func NewService(repository Repository, limits Limits) (*Service, error) {
 func (s *Service) Limits() Limits { return s.limits }
 
 func (s *Service) Create(ctx context.Context, actor Actor, name, title string) (Site, error) {
+	return s.CreateWithInput(ctx, actor, CreateInput{Name: name, Title: title})
+}
+
+func (s *Service) CreateWithInput(ctx context.Context, actor Actor, input CreateInput) (Site, error) {
 	if actor.UserID == "" {
 		return Site{}, ErrForbidden
 	}
-	name, err := NormalizeName(name)
+	name, err := NormalizeName(input.Name)
 	if err != nil {
 		return Site{}, err
 	}
-	title, err = normalizeTitle(title)
+	title, err := normalizeTitle(input.Title)
 	if err != nil {
 		return Site{}, err
 	}
-	return s.repository.CreateSite(ctx, actor.UserID, name, title, s.limits, s.now().UTC())
+	confirmed, confirmedErr := NormalizeName(input.ConfirmedReclaim)
+	allowReclaim := confirmedErr == nil && confirmed == name
+	return s.repository.CreateSite(
+		ctx, actor.UserID, name, title, allowReclaim, s.limits, s.now().UTC(),
+	)
 }
 
 func (s *Service) List(ctx context.Context, actor Actor) ([]Site, error) {

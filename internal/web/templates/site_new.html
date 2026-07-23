@@ -15,18 +15,34 @@
     </div>
 
     <div class="panel-card on-card form-stack">
-      <form action="/sites/create" method="post">
+      <form id="create-site" action="/sites/create" method="post">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        {{if .Create.ConfirmedReclaim}}<input type="hidden" name="confirmed_reclaim" value="{{.Create.ConfirmedReclaim}}">{{end}}
         <label class="field">Subdomain
-          <span class="input-affix"><input class="affix-leads" name="name" autocomplete="off" maxlength="48" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?" placeholder="my-site" required autofocus><span class="suffix">.{{.SiteDomain}}</span></span>
+          <span class="input-affix"><input class="affix-leads" name="name" autocomplete="off" maxlength="48" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?" placeholder="my-site" value="{{.Create.Name}}" required autofocus><span class="suffix">.{{.SiteDomain}}</span></span>
         </label>
         <label class="field">Private title <span class="optional">Optional</span>
-          <input name="title" autocomplete="off" maxlength="120" placeholder="My useful little site">
+          <input name="title" autocomplete="off" maxlength="120" placeholder="My useful little site" value="{{.Create.Title}}">
         </label>
+        {{if .Create.Error}}<p class="error" role="alert">{{.Create.Error}}</p>{{end}}
         <p class="helper">The name is shared with short links and stays reserved to your account. After creating the site, upload a ZIP bundle as its first private draft — nothing is public until you publish.</p>
         <button type="submit" class="btn">Create site</button>
       </form>
     </div>
+
+    {{if .Create.ConfirmedReclaim}}
+    <dialog class="confirm-dialog" data-confirm-dialog aria-labelledby="reclaim-title" open>
+      <div class="confirm-dialog-body">
+        <span class="confirm-kicker">Retired name</span>
+        <h2 id="reclaim-title">Reuse {{.Create.ConfirmedReclaim}}?</h2>
+        <p>You previously retired this short-link name. Reusing it will create a fresh site at <strong>{{.Create.ConfirmedReclaim}}.{{.SiteDomain}}</strong>. The old link and its analytics will remain archived.</p>
+        <div class="confirm-actions">
+          <a href="/sites/new" class="btn quiet">Keep retired</a>
+          <button type="submit" form="create-site" class="btn danger">Create site</button>
+        </div>
+      </div>
+    </dialog>
+    {{end}}
   </main>
 
   {{template "app_footer" .CSRFToken}}

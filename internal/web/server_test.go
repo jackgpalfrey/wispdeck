@@ -439,8 +439,39 @@ func TestShortLinkCreateResolveAndDisable(t *testing.T) {
 	reclaim.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	server.handler.ServeHTTP(w, reclaim)
-	if w.Code != http.StatusConflict {
+	if w.Code != http.StatusConflict ||
+		!strings.Contains(w.Body.String(), "Create fresh link") ||
+		!strings.Contains(w.Body.String(), `value="https://replacement.example"`) ||
+		!strings.Contains(w.Body.String(), `name="confirmed_reclaim" value="release-notes"`) {
 		t.Fatalf("retired-name reclaim status = %d, body = %q", w.Code, w.Body.String())
+	}
+	confirmedValues := directShortLinkValues(
+		session.CSRFToken, "release-notes", "https://replacement.example",
+	)
+	confirmedValues.Set("confirmed_reclaim", "some-other-name")
+	reclaim = request(http.MethodPost, "http://admin.example.test/links/create", confirmedValues)
+	reclaim.Header.Set("Origin", "http://admin.example.test")
+	reclaim.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, reclaim)
+	if w.Code != http.StatusConflict ||
+		!strings.Contains(w.Body.String(), `name="confirmed_reclaim" value="release-notes"`) {
+		t.Fatalf("mismatched reclaim confirmation = (%d, %q)", w.Code, w.Body.String())
+	}
+	confirmedValues.Set("confirmed_reclaim", "release-notes")
+	reclaim = request(http.MethodPost, "http://admin.example.test/links/create", confirmedValues)
+	reclaim.Header.Set("Origin", "http://admin.example.test")
+	reclaim.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, reclaim)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/?created=release-notes" {
+		t.Fatalf("confirmed retired-name reclaim = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
+	resolve = request(http.MethodGet, "http://admin.example.test/release-notes", nil)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, resolve)
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "https://replacement.example" {
+		t.Fatalf("reclaimed short link = (%d, %q)", w.Code, w.Header().Get("Location"))
 	}
 }
 
@@ -826,6 +857,50 @@ func TestDraftPreviewEntryContinuesThroughLogin(t *testing.T) {
 		t.Fatalf("preview login continuation = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
 	}
 	_ = cookie
+}
+
+func TestCreateSiteConfirmsRetiredLinkNameReuse(t *testing.T) {
+	server := newTestServer(t, false)
+	cookie, session := passwordOnlyLogin(t, server, "alice", "correct horse battery staple")
+	now := time.Now().UTC()
+	retired, err := server.database.CreateShortLink(context.Background(), session.User.ID, shortlink.Link{
+		Slug: "trip", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://old.example"}},
+	}, false, shortlink.DefaultLimits(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.database.RetireShortLink(
+		context.Background(), retired.ID, session.User.ID, false, now.Add(time.Second),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	values := url.Values{
+		"csrf_token": {session.CSRFToken}, "name": {"Trip"}, "title": {"Holiday plans"},
+	}
+	create := request(http.MethodPost, "http://admin.example.test/sites/create", values)
+	create.Header.Set("Origin", "http://admin.example.test")
+	create.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	server.handler.ServeHTTP(w, create)
+	body := w.Body.String()
+	if w.Code != http.StatusConflict ||
+		!strings.Contains(body, "Create site") ||
+		!strings.Contains(body, `name="confirmed_reclaim" value="trip"`) ||
+		!strings.Contains(body, `value="Holiday plans"`) {
+		t.Fatalf("site reclaim confirmation = (%d, %q)", w.Code, body)
+	}
+
+	values.Set("confirmed_reclaim", "trip")
+	create = request(http.MethodPost, "http://admin.example.test/sites/create", values)
+	create.Header.Set("Origin", "http://admin.example.test")
+	create.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	server.handler.ServeHTTP(w, create)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/sites/trip" {
+		t.Fatalf("confirmed site reclaim = (%d, %q, %q)", w.Code, w.Header().Get("Location"), w.Body.String())
+	}
 }
 
 func TestWispistHostedSiteLiveDraftIsolation(t *testing.T) {
@@ -1408,7 +1483,7 @@ func TestExpiredShortLinkIsPubliclyNotFound(t *testing.T) {
 	if _, err := server.database.CreateShortLink(ctx, user.ID, shortlink.Link{
 		Slug: "old", Mode: shortlink.ModeRedirect, ExpiresAt: createdAt.Add(time.Hour),
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, shortlink.DefaultLimits(), createdAt); err != nil {
+	}, false, shortlink.DefaultLimits(), createdAt); err != nil {
 		t.Fatal(err)
 	}
 	r := request(http.MethodGet, "http://admin.example.test/old", nil)
@@ -1441,14 +1516,14 @@ func TestShortLinkOwnershipAndSuperuserManagement(t *testing.T) {
 	aliceLink, err := server.database.CreateShortLink(ctx, alice.ID, shortlink.Link{
 		Slug: "alice-link", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://alice.example"}},
-	}, shortlink.DefaultLimits(), time.Now().UTC())
+	}, false, shortlink.DefaultLimits(), time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
 	bobLink, err := server.database.CreateShortLink(ctx, bob.ID, shortlink.Link{
 		Slug: "bob-link", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://bob.example"}},
-	}, shortlink.DefaultLimits(), time.Now().UTC())
+	}, false, shortlink.DefaultLimits(), time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -61,10 +61,19 @@ func (s *Server) createSite(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	created, err := s.sites.Create(
-		r.Context(), siteActor(session), r.PostForm.Get("name"), r.PostForm.Get("title"),
-	)
+	form := siteCreateForm{
+		Name: r.PostForm.Get("name"), Title: r.PostForm.Get("title"),
+		ConfirmedReclaim: r.PostForm.Get("confirmed_reclaim"),
+	}
+	created, err := s.sites.CreateWithInput(r.Context(), siteActor(session), hostedsite.CreateInput{
+		Name: form.Name, Title: form.Title, ConfirmedReclaim: form.ConfirmedReclaim,
+	})
 	if err != nil {
+		if errors.Is(err, hostedsite.ErrReclaimConfirmation) {
+			form.ConfirmedReclaim, _ = hostedsite.NormalizeName(form.Name)
+			s.renderNewSite(w, session, http.StatusConflict, form)
+			return
+		}
 		s.renderSiteManagementError(w, r, err, "Site not created")
 		return
 	}
@@ -236,6 +245,9 @@ func (s *Server) renderSiteManagementError(w http.ResponseWriter, r *http.Reques
 		status = http.StatusNotFound
 		message = "That site does not exist or you are not allowed to manage it."
 	case errors.Is(err, hostedsite.ErrNameUnavailable):
+		status = http.StatusConflict
+		message = err.Error()
+	case errors.Is(err, hostedsite.ErrReclaimConfirmation):
 		status = http.StatusConflict
 		message = err.Error()
 	case errors.Is(err, hostedsite.ErrSiteLimit), errors.Is(err, hostedsite.ErrReleaseLimit),

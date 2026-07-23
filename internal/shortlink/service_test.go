@@ -16,15 +16,17 @@ type fakeRepository struct {
 	stats    []DailyStat
 	visits   []VisitBucket
 	flushErr error
+	reclaim  bool
 }
 
-func (f *fakeRepository) CreateShortLink(_ context.Context, owner string, link Link, _ Limits, now time.Time) (Link, error) {
+func (f *fakeRepository) CreateShortLink(_ context.Context, owner string, link Link, reclaim bool, _ Limits, now time.Time) (Link, error) {
 	link.ID = "0123456789abcdef0123456789abcdef"
 	link.OwnerUserID = owner
 	link.Enabled = true
 	link.CreatedAt = now
 	link.UpdatedAt = now
 	f.created = link
+	f.reclaim = reclaim
 	return link, nil
 }
 
@@ -154,7 +156,8 @@ func TestServiceValidatesAndNormalizesRichLinkInput(t *testing.T) {
 	actor := Actor{UserID: "user-1"}
 	link, err := service.Create(context.Background(), actor, Input{
 		Slug: " Reading ", Title: " Private title ", Description: "notes\r\nline two",
-		Mode: ModeIndex, ExpiresAt: now.Add(time.Hour),
+		ConfirmedReclaim: "READING",
+		Mode:             ModeIndex, ExpiresAt: now.Add(time.Hour),
 		Destinations: []Destination{
 			{Label: " Docs ", URL: " https://docs.example "},
 			{Label: "Source", URL: "https://source.example"},
@@ -164,7 +167,8 @@ func TestServiceValidatesAndNormalizesRichLinkInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	if link.Slug != "reading" || link.Title != "Private title" || link.Description != "notes\nline two" ||
-		len(link.Destinations) != 2 || link.Destinations[0].Label != "Docs" || link.Destinations[0].Position != 0 {
+		len(link.Destinations) != 2 || link.Destinations[0].Label != "Docs" ||
+		link.Destinations[0].Position != 0 || !repository.reclaim {
 		t.Fatalf("normalized link = %#v", link)
 	}
 

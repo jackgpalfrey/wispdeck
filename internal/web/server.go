@@ -592,13 +592,14 @@ type shortLinkDestinationForm struct {
 }
 
 type shortLinkForm struct {
-	Slug         string
-	Title        string
-	Description  string
-	Mode         shortlink.Mode
-	ExpiresAt    string
-	Destinations []shortLinkDestinationForm
-	Error        string
+	Slug             string
+	Title            string
+	Description      string
+	Mode             shortlink.Mode
+	ExpiresAt        string
+	Destinations     []shortLinkDestinationForm
+	ConfirmedReclaim string
+	Error            string
 }
 
 type shortLinkView struct {
@@ -675,7 +676,11 @@ func (s *Server) createShortLink(w http.ResponseWriter, r *http.Request) {
 		if message, known := shortLinkErrorMessage(err); known {
 			form.Error = message
 			status := http.StatusBadRequest
-			if errors.Is(err, shortlink.ErrSlugUnavailable) || errors.Is(err, shortlink.ErrLinkLimit) {
+			if errors.Is(err, shortlink.ErrReclaimConfirmation) {
+				form.Error = ""
+				form.ConfirmedReclaim, _ = shortlink.NormalizeSlug(form.Slug)
+				status = http.StatusConflict
+			} else if errors.Is(err, shortlink.ErrSlugUnavailable) || errors.Is(err, shortlink.ErrLinkLimit) {
 				status = http.StatusConflict
 			}
 			s.renderDashboard(w, r, status, form)
@@ -773,6 +778,7 @@ func (s *Server) renderShortLinkError(w http.ResponseWriter, r *http.Request, er
 func shortLinkErrorMessage(err error) (string, bool) {
 	for _, known := range []error{
 		shortlink.ErrInvalidSlug, shortlink.ErrReservedSlug, shortlink.ErrSlugUnavailable,
+		shortlink.ErrReclaimConfirmation,
 		shortlink.ErrInvalidTarget, shortlink.ErrTargetTooLong, shortlink.ErrInvalidMode,
 		shortlink.ErrInvalidDestinations, shortlink.ErrDuplicateTarget,
 		shortlink.ErrInvalidTitle, shortlink.ErrInvalidDescription,
@@ -846,7 +852,8 @@ func shortLinkInputFromForm(r *http.Request, creating bool) (shortlink.Input, sh
 	form := shortLinkForm{
 		Slug: r.PostForm.Get("slug"), Title: r.PostForm.Get("title"),
 		Description: r.PostForm.Get("description"), Mode: shortlink.Mode(r.PostForm.Get("mode")),
-		ExpiresAt: r.PostForm.Get("expires_at"),
+		ExpiresAt:        r.PostForm.Get("expires_at"),
+		ConfirmedReclaim: r.PostForm.Get("confirmed_reclaim"),
 	}
 	labels := r.PostForm["target_label"]
 	targets := r.PostForm["target_url"]
@@ -873,6 +880,7 @@ func shortLinkInputFromForm(r *http.Request, creating bool) (shortlink.Input, sh
 	input := shortlink.Input{
 		Title: form.Title, Description: form.Description, Mode: form.Mode,
 		Destinations: destinations, ExpiresAt: expiresAt,
+		ConfirmedReclaim: form.ConfirmedReclaim,
 	}
 	if creating {
 		input.Slug = form.Slug

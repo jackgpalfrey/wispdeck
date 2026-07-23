@@ -115,6 +115,7 @@ type dashboardView struct {
 	CreatedURL     string
 	CreatedDisplay string
 	ShortenPrefill string
+	ShortenValue   string
 	Create         shortLinkForm
 	Rows           []dashRowView
 	LinkCount      int
@@ -189,6 +190,10 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 	}
 
 	form = withShortLinkFormDefaults(form)
+	shortenValue := prefill
+	if form.Destinations[0].URL != "" {
+		shortenValue = form.Destinations[0].URL
+	}
 	s.render(w, status, "dashboard.html", dashboardView{
 		Shell:      s.shell(session, "home"),
 		CSRFToken:  session.CSRFToken,
@@ -198,6 +203,7 @@ func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, status 
 		SiteDomain: s.config.SiteDomain,
 		CreatedURL: createdURL, CreatedDisplay: createdDisplay,
 		ShortenPrefill: prefill,
+		ShortenValue:   shortenValue,
 		Create:         form,
 		Rows:           rows,
 		LinkCount:      len(links),
@@ -521,17 +527,34 @@ func (s *Server) managedSiteByName(ctx context.Context, session auth.Session, na
 	return hostedsite.Site{}, hostedsite.ErrNotFound
 }
 
+type siteCreateForm struct {
+	Name             string
+	Title            string
+	ConfirmedReclaim string
+	Error            string
+}
+
+type siteCreateView struct {
+	Shell      shellView
+	CSRFToken  string
+	SiteDomain string
+	Create     siteCreateForm
+}
+
 func (s *Server) newSitePage(w http.ResponseWriter, r *http.Request) {
 	session := sessionFromContext(r.Context())
 	if !managedAssurance(session) {
 		http.Redirect(w, r, "/security/passkeys", http.StatusSeeOther)
 		return
 	}
-	s.render(w, http.StatusOK, "site_new.html", struct {
-		Shell      shellView
-		CSRFToken  string
-		SiteDomain string
-	}{s.shell(session, "home"), session.CSRFToken, s.config.SiteDomain})
+	s.renderNewSite(w, session, http.StatusOK, siteCreateForm{})
+}
+
+func (s *Server) renderNewSite(w http.ResponseWriter, session auth.Session, status int, form siteCreateForm) {
+	s.render(w, status, "site_new.html", siteCreateView{
+		Shell: s.shell(session, "home"), CSRFToken: session.CSRFToken,
+		SiteDomain: s.config.SiteDomain, Create: form,
+	})
 }
 
 /* ---------- settings ---------- */

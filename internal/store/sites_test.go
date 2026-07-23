@@ -31,23 +31,23 @@ func TestSiteReleasePublicationPreviewAndGlobalNames(t *testing.T) {
 	}
 
 	limits := site.DefaultLimits()
-	created, err := database.CreateSite(ctx, alice.ID, "notes", "Private notes site", limits, now)
+	created, err := database.CreateSite(ctx, alice.ID, "notes", "Private notes site", false, limits, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.CreateShortLink(ctx, alice.ID, shortlink.Link{
 		Slug: "notes", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, shortlink.DefaultLimits(), now); !errors.Is(err, shortlink.ErrSlugUnavailable) {
+	}, false, shortlink.DefaultLimits(), now); !errors.Is(err, shortlink.ErrSlugUnavailable) {
 		t.Fatalf("link using site name error = %v", err)
 	}
 	if _, err := database.CreateShortLink(ctx, alice.ID, shortlink.Link{
 		Slug: "other", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, shortlink.DefaultLimits(), now); err != nil {
+	}, false, shortlink.DefaultLimits(), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.CreateSite(ctx, alice.ID, "other", "", limits, now); !errors.Is(err, site.ErrNameUnavailable) {
+	if _, err := database.CreateSite(ctx, alice.ID, "other", "", false, limits, now); !errors.Is(err, site.ErrNameUnavailable) {
 		t.Fatalf("site using link name error = %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestSiteReleasePublicationPreviewAndGlobalNames(t *testing.T) {
 		sites[0].DraftReleaseID != "" || sites[0].PublishedReleaseID != "" {
 		t.Fatalf("purged site = (%#v, %v)", sites, err)
 	}
-	if _, err := database.CreateSite(ctx, alice.ID, "notes", "replacement", limits, now.Add(9*time.Minute)); !errors.Is(err, site.ErrNameUnavailable) {
+	if _, err := database.CreateSite(ctx, alice.ID, "notes", "replacement", false, limits, now.Add(9*time.Minute)); !errors.Is(err, site.ErrNameUnavailable) {
 		t.Fatalf("purged name was released: %v", err)
 	}
 	republished, err := database.CreateSiteRelease(ctx, alice.ID, false, created.ID, bundleTwo, limits, now.Add(10*time.Minute))
@@ -184,6 +184,63 @@ func TestSiteReleasePublicationPreviewAndGlobalNames(t *testing.T) {
 	}
 }
 
+func TestRetiredLinkNameCanBecomeFreshSiteOnlyForOwner(t *testing.T) {
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "wispdeck.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	now := time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+	alice, err := database.CreateUser(ctx, "alice", "hash", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := database.CreateUser(ctx, "bob", "hash", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired, err := database.CreateShortLink(ctx, alice.ID, shortlink.Link{
+		Slug: "itinerary", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://old.example"}},
+	}, false, shortlink.DefaultLimits(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RetireShortLink(ctx, retired.ID, alice.ID, false, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	limits := site.DefaultLimits()
+	if _, err := database.CreateSite(
+		ctx, alice.ID, "itinerary", "Holiday", false, limits, now.Add(2*time.Minute),
+	); !errors.Is(err, site.ErrReclaimConfirmation) {
+		t.Fatalf("unconfirmed site reclamation error = %v", err)
+	}
+	if _, err := database.CreateSite(
+		ctx, bob.ID, "itinerary", "Takeover", true, limits, now.Add(2*time.Minute),
+	); !errors.Is(err, site.ErrNameUnavailable) {
+		t.Fatalf("cross-owner site reclamation error = %v", err)
+	}
+	created, err := database.CreateSite(
+		ctx, alice.ID, "itinerary", "Holiday", true, limits, now.Add(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == retired.ID {
+		t.Fatal("site reused the retired link identity")
+	}
+	loaded, err := database.SiteByName(ctx, "itinerary")
+	if err != nil || loaded.ID != created.ID || loaded.Title != "Holiday" {
+		t.Fatalf("reclaimed site = (%+v, %v)", loaded, err)
+	}
+	if _, err := database.ResolveShortLink(ctx, "itinerary", now.Add(3*time.Minute)); !errors.Is(err, shortlink.ErrNotFound) {
+		t.Fatalf("retired link still resolved after conversion: %v", err)
+	}
+}
+
 func TestSiteQuotasAreEnforcedAtomically(t *testing.T) {
 	ctx := context.Background()
 	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "wispdeck.db"))
@@ -197,11 +254,11 @@ func TestSiteQuotasAreEnforcedAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	limits := site.Limits{MaxSitesPerUser: 1, MaxReleasesPerSite: 2, MaxStorageBytesPerUser: 1 << 20}
-	created, err := database.CreateSite(ctx, owner.ID, "one", "", limits, now)
+	created, err := database.CreateSite(ctx, owner.ID, "one", "", false, limits, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.CreateSite(ctx, owner.ID, "two", "", limits, now); !errors.Is(err, site.ErrSiteLimit) {
+	if _, err := database.CreateSite(ctx, owner.ID, "two", "", false, limits, now); !errors.Is(err, site.ErrSiteLimit) {
 		t.Fatalf("site quota error = %v", err)
 	}
 	bundle := testBundle(map[string]string{"index.html": "one"})

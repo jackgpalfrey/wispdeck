@@ -9,6 +9,15 @@ document.addEventListener("submit", (event) => {
   }
 });
 
+/* ---------- server-authorized name reclamation ---------- */
+
+for (const dialog of document.querySelectorAll("[data-confirm-dialog]")) {
+  if (typeof dialog.showModal === "function") {
+    dialog.removeAttribute("open");
+    dialog.showModal();
+  }
+}
+
 /* ---------- copy buttons ---------- */
 
 document.addEventListener("click", async (event) => {

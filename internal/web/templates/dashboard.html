@@ -26,13 +26,14 @@
     </div>
     {{end}}
 
-    <form action="/links/create" method="post">
+    <form id="create-short-link" action="/links/create" method="post">
       <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
       <input type="hidden" name="mode" value="redirect">
       <input type="hidden" name="target_label" value="">
+      {{if .Create.ConfirmedReclaim}}<input type="hidden" name="confirmed_reclaim" value="{{.Create.ConfirmedReclaim}}">{{end}}
       <div class="bar">
         <label class="sr-only" for="shorten-url">URL to shorten</label>
-        <input id="shorten-url" name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" placeholder="Paste a long URL to shorten…" value="{{.ShortenPrefill}}"{{if .ShortenPrefill}} autofocus{{end}} required>
+        <input id="shorten-url" name="target_url" type="url" inputmode="url" autocomplete="off" maxlength="4096" placeholder="Paste a long URL to shorten…" value="{{.ShortenValue}}"{{if .ShortenPrefill}} autofocus{{end}} required>
         <button type="submit" class="btn">Shorten</button>
         <a class="btn ghost" href="/sites/new">+ New site</a>
       </div>
@@ -53,6 +54,20 @@
         </div>
       </details>
     </form>
+
+    {{if .Create.ConfirmedReclaim}}
+    <dialog class="confirm-dialog" data-confirm-dialog aria-labelledby="reclaim-title" open>
+      <div class="confirm-dialog-body">
+        <span class="confirm-kicker">Retired name</span>
+        <h2 id="reclaim-title">Reuse /{{.Create.ConfirmedReclaim}}?</h2>
+        <p>You previously retired this name. Reusing it will create a fresh link; its old destinations, history, and analytics will stay retired and will not carry over.</p>
+        <div class="confirm-actions">
+          <a href="/" class="btn quiet">Keep retired</a>
+          <button type="submit" form="create-short-link" class="btn danger">Create fresh link</button>
+        </div>
+      </div>
+    </dialog>
+    {{end}}
 
     <div class="stat-strip">
       <div><span class="n">{{.LinkCount}}</span> link{{if ne .LinkCount 1}}s{{end}}</div>

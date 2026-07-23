@@ -33,6 +33,7 @@ var (
 	ErrForbidden           = errors.New("short-link operation is forbidden")
 	ErrNotFound            = errors.New("short link not found")
 	ErrSlugUnavailable     = errors.New("that short name is already in use")
+	ErrReclaimConfirmation = errors.New("confirm that you want to reuse this retired short name")
 	ErrInvalidSlug         = fmt.Errorf("short name must be %d to %d characters using lowercase letters, numbers, or hyphens", MinSlugLength, MaxSlugLength)
 	ErrReservedSlug        = errors.New("that short name is reserved by Wispdeck")
 	ErrInvalidTarget       = errors.New("destination must be an absolute HTTP or HTTPS URL without embedded credentials")
@@ -117,12 +118,13 @@ type Link struct {
 }
 
 type Input struct {
-	Slug         string
-	Title        string
-	Description  string
-	Mode         Mode
-	Destinations []Destination
-	ExpiresAt    time.Time
+	Slug             string
+	Title            string
+	Description      string
+	Mode             Mode
+	Destinations     []Destination
+	ExpiresAt        time.Time
+	ConfirmedReclaim string
 }
 
 type DailyStat struct {
@@ -159,7 +161,7 @@ type AuditEvent struct {
 // Repository owns durable short-link state. Owner-aware mutations must apply
 // their authorization predicate in the same SQL statement as the mutation.
 type Repository interface {
-	CreateShortLink(context.Context, string, Link, Limits, time.Time) (Link, error)
+	CreateShortLink(context.Context, string, Link, bool, Limits, time.Time) (Link, error)
 	ShortLinks(context.Context, string, bool) ([]Link, error)
 	UpdateShortLink(context.Context, string, string, bool, Input, time.Time) error
 	SetShortLinkEnabled(context.Context, string, string, bool, bool, time.Time) error
@@ -215,7 +217,10 @@ func (s *Service) Create(ctx context.Context, actor Actor, input Input) (Link, e
 		if err != nil {
 			return Link{}, err
 		}
-		return s.repository.CreateShortLink(ctx, actor.UserID, linkFromInput(validated), s.limits, now)
+		allowReclaim := confirmedReclaim(validated.ConfirmedReclaim, validated.Slug)
+		return s.repository.CreateShortLink(
+			ctx, actor.UserID, linkFromInput(validated), allowReclaim, s.limits, now,
+		)
 	}
 
 	for range 8 {
@@ -223,11 +228,13 @@ func (s *Service) Create(ctx context.Context, actor Actor, input Input) (Link, e
 		if err != nil {
 			return Link{}, err
 		}
-		link, createErr := s.repository.CreateShortLink(ctx, actor.UserID, linkFromInput(validated), s.limits, now)
+		link, createErr := s.repository.CreateShortLink(
+			ctx, actor.UserID, linkFromInput(validated), false, s.limits, now,
+		)
 		if createErr == nil {
 			return link, nil
 		}
-		if !errors.Is(createErr, ErrSlugUnavailable) {
+		if !errors.Is(createErr, ErrSlugUnavailable) && !errors.Is(createErr, ErrReclaimConfirmation) {
 			return Link{}, createErr
 		}
 	}
@@ -360,7 +367,13 @@ func (s *Service) validateInput(input Input, creating bool, now time.Time) (Inpu
 	return Input{
 		Slug: slug, Title: title, Description: description, Mode: input.Mode,
 		Destinations: destinations, ExpiresAt: expiresAt,
+		ConfirmedReclaim: input.ConfirmedReclaim,
 	}, nil
+}
+
+func confirmedReclaim(confirmed, name string) bool {
+	confirmed, err := NormalizeSlug(confirmed)
+	return err == nil && confirmed == name
 }
 
 func linkFromInput(input Input) Link {

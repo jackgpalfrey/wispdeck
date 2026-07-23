@@ -34,7 +34,7 @@ func TestSQLiteShortLinkLifecycleAuthorizationStatsAndAudit(t *testing.T) {
 		Slug: "release-notes", Title: "Private title", Description: "Private notes",
 		Mode: shortlink.ModeRedirect, ExpiresAt: now.Add(24 * time.Hour),
 		Destinations: []shortlink.Destination{{Label: "Release", URL: "https://example.com/v1"}},
-	}, shortlink.DefaultLimits(), now)
+	}, false, shortlink.DefaultLimits(), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestSQLiteShortLinkLifecycleAuthorizationStatsAndAudit(t *testing.T) {
 	if _, err := database.CreateShortLink(ctx, bob.ID, shortlink.Link{
 		Slug: "release-notes", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.net"}},
-	}, shortlink.DefaultLimits(), now); !errors.Is(err, shortlink.ErrSlugUnavailable) {
+	}, false, shortlink.DefaultLimits(), now); !errors.Is(err, shortlink.ErrSlugUnavailable) {
 		t.Fatalf("duplicate slug error = %v", err)
 	}
 
@@ -126,8 +126,41 @@ func TestSQLiteShortLinkLifecycleAuthorizationStatsAndAudit(t *testing.T) {
 	if _, err := database.CreateShortLink(ctx, alice.ID, shortlink.Link{
 		Slug: "release-notes", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://replacement.example"}},
-	}, shortlink.DefaultLimits(), now.Add(8*time.Minute)); !errors.Is(err, shortlink.ErrSlugUnavailable) {
-		t.Fatalf("retired slug reuse error = %v", err)
+	}, false, shortlink.DefaultLimits(), now.Add(8*time.Minute)); !errors.Is(err, shortlink.ErrReclaimConfirmation) {
+		t.Fatalf("unconfirmed retired slug reuse error = %v", err)
+	}
+	if _, err := database.CreateShortLink(ctx, bob.ID, shortlink.Link{
+		Slug: "release-notes", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://takeover.example"}},
+	}, true, shortlink.DefaultLimits(), now.Add(8*time.Minute)); !errors.Is(err, shortlink.ErrSlugUnavailable) {
+		t.Fatalf("cross-owner retired slug reuse error = %v", err)
+	}
+	replacement, err := database.CreateShortLink(ctx, alice.ID, shortlink.Link{
+		Slug: "release-notes", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://replacement.example"}},
+	}, true, shortlink.DefaultLimits(), now.Add(8*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.ID == link.ID {
+		t.Fatal("retired link was revived instead of creating a fresh link")
+	}
+	resolved, err = database.ResolveShortLink(ctx, "release-notes", now.Add(9*time.Minute))
+	if err != nil || resolved.ID != replacement.ID ||
+		resolved.Destinations[0].URL != "https://replacement.example" {
+		t.Fatalf("reclaimed link = (%+v, %v)", resolved, err)
+	}
+	var retiredVisits, replacementVisits int64
+	if err := database.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE((SELECT SUM(visits) FROM short_link_daily_stats WHERE link_id = ?), 0),
+			COALESCE((SELECT SUM(visits) FROM short_link_daily_stats WHERE link_id = ?), 0)`,
+		link.ID, replacement.ID,
+	).Scan(&retiredVisits, &replacementVisits); err != nil {
+		t.Fatal(err)
+	}
+	if retiredVisits != 5 || replacementVisits != 0 {
+		t.Fatalf("analytics after reuse = retired %d, replacement %d", retiredVisits, replacementVisits)
 	}
 
 	events, err := database.ShortLinkAuditEvents(ctx, alice.ID, false, 10)
@@ -159,7 +192,7 @@ func TestSQLiteShortLinkRequiresActiveOwner(t *testing.T) {
 	if _, err := database.CreateShortLink(ctx, user.ID, shortlink.Link{
 		Slug: "blocked", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, shortlink.DefaultLimits(), now); !errors.Is(err, shortlink.ErrForbidden) {
+	}, false, shortlink.DefaultLimits(), now); !errors.Is(err, shortlink.ErrForbidden) {
 		t.Fatalf("disabled-owner creation error = %v", err)
 	}
 }
@@ -180,14 +213,14 @@ func TestShortLinkQuotaIncludesPermanentlyReservedRetiredLinks(t *testing.T) {
 	first, err := database.CreateShortLink(ctx, user.ID, shortlink.Link{
 		Slug: "first", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, limits, now)
+	}, false, limits, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.CreateShortLink(ctx, user.ID, shortlink.Link{
 		Slug: "second", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, limits, now); !errors.Is(err, shortlink.ErrLinkLimit) {
+	}, false, limits, now); !errors.Is(err, shortlink.ErrLinkLimit) {
 		t.Fatalf("link quota error = %v", err)
 	}
 	if err := database.RetireShortLink(ctx, first.ID, user.ID, false, now.Add(time.Minute)); err != nil {
@@ -196,8 +229,20 @@ func TestShortLinkQuotaIncludesPermanentlyReservedRetiredLinks(t *testing.T) {
 	if _, err := database.CreateShortLink(ctx, user.ID, shortlink.Link{
 		Slug: "second", Mode: shortlink.ModeRedirect,
 		Destinations: []shortlink.Destination{{URL: "https://example.com"}},
-	}, limits, now.Add(2*time.Minute)); !errors.Is(err, shortlink.ErrLinkLimit) {
+	}, false, limits, now.Add(2*time.Minute)); !errors.Is(err, shortlink.ErrLinkLimit) {
 		t.Fatalf("retired permanent name did not consume quota: %v", err)
+	}
+	if _, err := database.CreateShortLink(ctx, user.ID, shortlink.Link{
+		Slug: "first", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://replacement.example"}},
+	}, false, limits, now.Add(2*time.Minute)); !errors.Is(err, shortlink.ErrReclaimConfirmation) {
+		t.Fatalf("same-name reclaim did not request confirmation: %v", err)
+	}
+	if _, err := database.CreateShortLink(ctx, user.ID, shortlink.Link{
+		Slug: "first", Mode: shortlink.ModeRedirect,
+		Destinations: []shortlink.Destination{{URL: "https://replacement.example"}},
+	}, true, limits, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("same-name reclaim at quota failed: %v", err)
 	}
 }
 
@@ -265,5 +310,129 @@ func TestMigrationSevenPreservesExistingShortLinks(t *testing.T) {
 	}
 	if kind != "link" || resourceID != linkID {
 		t.Fatalf("migrated public name = (%q, %q)", kind, resourceID)
+	}
+}
+
+func TestMigrationFourteenPreservesRetiredLinkHistoryAndAllowsFreshSlug(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "wispdeck.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range []func(context.Context, *sql.Tx) error{
+		migrationOne, migrationTwo, migrationThree, migrationFour, migrationFive,
+		migrationSix, migrationSeven, migrationEight, migrationNine, migrationTen,
+		migrationEleven, migrationTwelve, migrationThirteen,
+	} {
+		if err := migration(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userID := "11111111111111111111111111111111"
+	oldLinkID := "22222222222222222222222222222222"
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO users (
+			id, username, password_hash, created_at, updated_at, mfa_skipped, role, status
+		) VALUES (?, 'alice', 'hash', 100, 100, 0, 'user', 'active')`,
+		userID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO short_links (
+			id, owner_user_id, slug, mode, enabled, created_at, updated_at, deleted_at
+		) VALUES (?, ?, 'again', 'redirect', 0, 100, 200, 200)`,
+		oldLinkID, userID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO short_link_destinations (id, link_id, position, target_url)
+		VALUES ('33333333333333333333333333333333', ?, 0, 'https://old.example')`,
+		oldLinkID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO short_link_daily_stats (link_id, day, visits, last_visited_at)
+		VALUES (?, 0, 7, 150)`,
+		oldLinkID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO short_link_audit_events (
+			occurred_at, actor_user_id, owner_user_id, link_id, slug, kind
+		) VALUES (200, ?, ?, ?, 'again', 'retired')`,
+		userID, userID, oldLinkID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO public_names (
+			name, owner_user_id, kind, resource_id, created_at, retired_at
+		) VALUES ('again', ?, 'link', ?, 100, 200)`,
+		userID, oldLinkID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrationFourteen(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	newLinkID := "44444444444444444444444444444444"
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO short_links (
+			id, owner_user_id, slug, mode, enabled, created_at, updated_at
+		) VALUES (?, ?, 'again', 'redirect', 1, 300, 300)`,
+		newLinkID, userID,
+	); err != nil {
+		t.Fatalf("insert fresh link with retired slug: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO short_links (
+			id, owner_user_id, slug, mode, enabled, created_at, updated_at
+		) VALUES ('55555555555555555555555555555555', ?, 'again', 'redirect', 1, 301, 301)`,
+		userID,
+	); err == nil {
+		t.Fatal("inserted a second active link with the same slug")
+	}
+	var destinations, visits, audits int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM short_link_destinations WHERE link_id = ?),
+			(SELECT SUM(visits) FROM short_link_daily_stats WHERE link_id = ?),
+			(SELECT COUNT(*) FROM short_link_audit_events WHERE link_id = ?)`,
+		oldLinkID, oldLinkID, oldLinkID,
+	).Scan(&destinations, &visits, &audits); err != nil {
+		t.Fatal(err)
+	}
+	if destinations != 1 || visits != 7 || audits != 1 {
+		t.Fatalf("preserved history = destinations %d, visits %d, audits %d", destinations, visits, audits)
+	}
+	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows.Next() {
+		_ = rows.Close()
+		t.Fatal("migration left a foreign-key violation")
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 }
