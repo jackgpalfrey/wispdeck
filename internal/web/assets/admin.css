@@ -1318,35 +1318,197 @@ input.setup-secret { font: 12.5px var(--mono); }
 
 /* ---------- responsive ---------- */
 
+/* Mobile Safari zooms focused controls whose computed text size is below
+   16px. Keep the compact desktop scale, but use the platform-safe size on
+   touch-first devices without disabling user zoom in the viewport. */
+@media (any-pointer: coarse) {
+  input[type="text"],
+  input[type="password"],
+  input[type="url"],
+  input[type="search"],
+  input[type="email"],
+  input[type="tel"],
+  input[type="number"],
+  input[type="datetime-local"],
+  input:not([type]),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  input.setup-code-input { font-size: 20px; }
+
+  button,
+  .btn,
+  .chip,
+  .release-action,
+  .add-destination,
+  details > summary {
+    min-height: 44px;
+  }
+
+  .theme-toggle,
+  .user-chip {
+    width: 44px;
+    height: 44px;
+  }
+}
+
 @media (max-width: 900px) {
   .thead, .trow { grid-template-columns: 44px 150px 1fr 70px 60px; }
   .thead > :nth-child(4), .trow > :nth-child(4),
   .thead > :nth-child(6), .trow > :nth-child(6) { display: none; }
   .two-col { grid-template-columns: 1fr; }
   .advanced-grid { grid-template-columns: 1fr; }
-	.data-console { grid-template-columns: 1fr; }
-	.data-collections nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .data-console { grid-template-columns: 1fr; }
+  .data-collections nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 640px) {
   .page { padding: 18px 16px 48px; }
-  .shell-header { padding: 12px 16px; flex-wrap: wrap; }
+  .shell-header { gap: 8px 12px; padding: 8px 16px; flex-wrap: wrap; }
+  .shell-header .brand { min-width: 0; }
+  .nav-tabs {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+    gap: 6px;
+  }
+  .nav-tabs a {
+    flex: 1;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 10px;
+  }
+  .header-tools { gap: 2px; }
+
+  .landing-header { padding: 10px 16px; }
+  .landing-header .brand-note { display: none; }
+  .landing-header .nav-links { gap: 8px; }
+  .landing-main { justify-content: flex-start; padding: 48px 16px 64px; }
   .landing-hero h1 { font-size: 34px; }
+  .landing-form { flex-direction: column; }
+  .landing-form .btn { width: 100%; }
+  .feature-strip { gap: 14px 20px; margin-top: 34px; }
+  .landing-footer { padding: 16px; flex-wrap: wrap; }
+
+  .auth-main { padding: 16px; }
+  .auth-card { padding: 22px 18px; }
+  .onboarding-brand-row { margin-bottom: 16px; }
+
   .bar { flex-wrap: wrap; }
   .bar input { min-width: 100%; }
-  .thead, .trow { grid-template-columns: 44px 1fr 60px; }
+  .bar .btn {
+    flex: 1 1 calc(50% - 5px);
+    min-height: 44px;
+  }
+  .options-panel > summary { min-height: 44px; margin-top: 4px; }
+  .options-body {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .options-body label {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .options-body input,
+  .options-body .input-affix,
+  .options-body .input-affix input,
+  .options-body input[name="title"] {
+    width: 100%;
+  }
+
+  .success-banner .banner-url {
+    width: 100%;
+    overflow-wrap: anywhere;
+  }
+  .success-banner .success-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+  .success-banner .success-actions > * { flex: 1; }
+
+  .chip-row {
+    overflow-x: auto;
+    margin: 0 -16px;
+    padding: 0 16px 12px;
+    scrollbar-width: none;
+  }
+  .chip-row::-webkit-scrollbar { display: none; }
+  .chip { flex: none; }
+
+  .thead, .trow {
+    grid-template-columns: 40px minmax(0, 1fr) 52px;
+    gap: 8px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
   .thead > :nth-child(3), .trow > :nth-child(3),
   .thead > :nth-child(5), .trow > :nth-child(5) { display: none; }
+  .trow .btn { width: 52px; min-height: 40px; }
+
   .destination-row { grid-template-columns: 1fr; }
+  .destination-row .btn { width: 100%; }
   .stat-strip { gap: 18px; }
   .stat-strip .filter { margin-left: 0; width: 100%; }
   .stat-strip .filter input { width: 100%; }
-  .detail-title { font-size: 20px; }
+
+  .detail-head { align-items: center; gap: 8px; }
+  .detail-title {
+    width: 100%;
+    font-size: 20px;
+    overflow-wrap: anywhere;
+  }
+  .detail-head .btn { flex: 1 1 auto; min-height: 40px; }
+  .detail-head form {
+    flex: 1 1 100%;
+    display: flex;
+  }
+  .detail-head form .btn { width: 100%; }
+  .detail-dest { width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  .detail-stats { gap: 14px 20px; padding-top: 18px; }
+
+  .panel-card { padding: 16px; }
+  .release-row { align-items: flex-start; gap: 8px; }
+  .release-row .msg { flex-basis: calc(100% - 60px); min-width: 0; }
+  .release-action { min-height: 40px; }
+
+  .toggle-row { align-items: flex-start; }
+  .toggle-row form { width: 100%; margin-left: 0; }
+  .toggle-row form .btn { width: 100%; }
+
+  .kv > div { flex-direction: column; gap: 2px; }
+  .kv dt { min-width: 0; }
+
+  .save-row { flex-direction: column; }
+  .save-row .btn { width: 100%; }
+  .progressive-panel > summary { min-height: 44px; }
+  .progressive-panel > summary small { margin-top: 2px; }
+
+  .records form { width: 100%; align-items: stretch; }
+  .records form select { flex: 1 1 auto; min-width: 0; }
+  .records form .btn { min-height: 44px; }
+
   .codes { columns: 1; }
-	.onboarding-steps li { flex-direction: column; justify-content: flex-start; text-align: center; }
-	.segmented { display: flex; }
-	.segmented a { flex: 1; flex-direction: column; gap: 0; }
-	.data-collections nav { grid-template-columns: 1fr; }
-	.document-time { display: none; }
-	.document-body { margin-left: 0; }
+  .qr-code { max-width: 100%; height: auto; }
+
+  .onboarding-steps li { flex-direction: column; justify-content: flex-start; text-align: center; }
+
+  .segmented { display: flex; width: 100%; }
+  .segmented a { flex: 1; flex-direction: column; gap: 0; text-align: center; }
+  .data-collections nav { grid-template-columns: 1fr; }
+  .data-section-head { flex-direction: column; }
+  .document-card > summary { min-height: 44px; }
+  .document-time { display: none; }
+  .document-body { margin-left: 0; padding: 12px; }
+
+  .public-main { padding: 16px; }
+  .public-card { padding: 22px 18px; }
+
+  .app-footer { padding: 16px; flex-wrap: wrap; }
 }
